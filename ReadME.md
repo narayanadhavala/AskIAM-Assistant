@@ -94,6 +94,9 @@ sleep 30
 
 # Load sample data
 mysql -h 127.0.0.1 -u root -proot123 < ../database/iam_sample_data.sql
+
+# To Access the MySQL server
+docker exec -it iam-mysql mysql -u root -proot123
 ```
 
 #### 3.2 ChromaDB (Vector Store)

@@ -5,7 +5,7 @@ from mcp.trace import get_trace_handler
 _vectordb = None
 _llm = None
 
-def validate_with_rag(text: str, k=1) -> str | None:
+def validate_with_rag(text: str, k=3) -> str | None:
     global _vectordb, _llm
     trace_handler = get_trace_handler()
 

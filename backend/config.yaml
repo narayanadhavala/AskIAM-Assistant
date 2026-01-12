@@ -1,16 +1,5 @@
-# DEPRECATED: Configuration moved to root-level
-# Use ../config.yaml instead with environment overrides from config/ directory
-#
-# The main configuration has been moved to:
-# - Root config.yaml (base configuration)
-# - config/development.yaml (development overrides)
-# - config/production.yaml (production overrides)
-# - config/test.yaml (test overrides)
-#
-# To use environment-specific config, set ASKIAM_ENV:
-#   export ASKIAM_ENV=development  # or production, test
-#
-# Please update core/config_loader.py to use the new root-level structure.
+# Configuration for AskIAM Assistant
+# Backend module configuration
 
 ollama:
   base_url: http://localhost:11434
@@ -21,6 +10,13 @@ chroma:
   host: localhost
   port: 8000
   collection: iam-metadata
+
+database:
+  host: localhost
+  port: 3306
+  user: root
+  password: root123
+  database: iam_demo
 
 toolbox:
   url: http://127.0.0.1:5000

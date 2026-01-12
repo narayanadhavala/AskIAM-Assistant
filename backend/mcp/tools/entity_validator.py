@@ -12,14 +12,20 @@ def validate_entity_tool(
     table: str,
     id_column: str,
     name_column: str,
-    value: str,
+    value: str = None,
 ) -> str:
     """
     Generic IAM entity validation tool.
 
     Generates and executes:
     SELECT <id_column> FROM <table> WHERE <name_column> = ? LIMIT 1
+    
+    Returns: JSON list of matching records or error message
     """
+    
+    # Handle None/empty values
+    if value is None or value == "":
+        return f"Error: Empty value provided for {name_column} in {table}"
 
     sql = generate_sql_tool.invoke(
         {

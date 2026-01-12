@@ -10,7 +10,7 @@ def run_mcp(text: str) -> str:
     state: IAMState = {
         "raw_request": text,
         "user_name": None,
-        "app_name": None,
+        "application_name": None,
         "role_name": None,
         "error": None,
         "final_response": None,
@@ -31,7 +31,7 @@ def run_mcp(text: str) -> str:
     result = (
         "VALID: "
         f"{state['user_name']} can request {state['role_name']} "
-        f"in {state['app_name']}"
+        f"in {state['application_name']}"
     )
     
     return result

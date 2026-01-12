@@ -12,6 +12,15 @@ def run_validations(state: IAMState) -> IAMState:
     try:
         for key, entity in entities.items():
             value = state.get(f"{key}_name")
+            
+            # Skip validation if value is None (not extracted)
+            if value is None:
+                trace_handler.on_tool_start(
+                    {"name": f"validate_entity_tool ({entity['table']})"},
+                    f"Skipped: value is None"
+                )
+                trace_handler.on_tool_end(f"Skipped validation: {key}_name not extracted")
+                continue
 
             # Log tool start
             tool_input = {

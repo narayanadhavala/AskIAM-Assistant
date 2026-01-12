@@ -10,26 +10,29 @@ def extract_request(state: IAMState) -> IAMState:
 
     system = SystemMessagePromptTemplate.from_template(
         """
-        Extract IAM access request parameters.
+        Extract IAM access request parameters from user input.
 
-        Return ONLY valid JSON.
-        No markdown.
-        No explanation.
-        No extra text.
+        Return ONLY valid JSON. No markdown. No explanation. No extra text.
 
         Keys must be exactly:
-        - user_name
-        - app_name
-        - role_name
+        - user_name: The person's name (e.g., "John.Doe", "Aaron.Nichols")
+        - application_name: The application name (e.g., "Workday", "NetSuite", "Azure AD")
+        - role_name: The role or access level (e.g., "HR Analyst", "Admin", "Developer")
 
-        Use null if missing.
+        Use null if unable to extract. Only use null when information is not provided.
 
-        Example:
-        {{
-          "user_name": "Aaron.Nichols",
-          "app_name": "Workday",
-          "role_name": "HR Analyst"
-        }}
+        Examples:
+        Input: "Aaron.Nichols needs HR Analyst access in Workday"
+        Output: {{"user_name": "Aaron.Nichols", "application_name": "Workday", "role_name": "HR Analyst"}}
+
+        Input: "Can I get admin access?"
+        Output: {{"user_name": null, "application_name": null, "role_name": "Admin"}}
+
+        Input: "Can I get access for Azure Admin in Azure AD"
+        Output: {{"user_name": null, "application_name": "Azure AD", "role_name": "Azure Admin"}}
+
+        Input: "I'm Venkata Dhavala and I need access for Developer role for GitHub"
+        Output: {{"user_name": "Venkata.Dhavala", "application_name": "GitHub", "role_name": "Developer"}}
         """
     )
 

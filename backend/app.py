@@ -31,7 +31,8 @@ with gr.Blocks(title=cfg["ui"]["title"]) as demo:
     gr.Markdown(
         "Ask for access like:\n"
         "- I need access to the HR Analyst role in the Workday application\n"
-        "- I need access to the Payroll Admin role in the Salesforce application"
+        "- I need access to the Payroll Admin role in the Salesforce application\n"
+        "- I'm Venkata.Dhavala and I need access for Azure Admin role for Azure AD"
     )
     
     with gr.Row():
