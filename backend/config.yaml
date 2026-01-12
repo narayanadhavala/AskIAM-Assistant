@@ -1,0 +1,48 @@
+# DEPRECATED: Configuration moved to root-level
+# Use ../config.yaml instead with environment overrides from config/ directory
+#
+# The main configuration has been moved to:
+# - Root config.yaml (base configuration)
+# - config/development.yaml (development overrides)
+# - config/production.yaml (production overrides)
+# - config/test.yaml (test overrides)
+#
+# To use environment-specific config, set ASKIAM_ENV:
+#   export ASKIAM_ENV=development  # or production, test
+#
+# Please update core/config_loader.py to use the new root-level structure.
+
+ollama:
+  base_url: http://localhost:11434
+  llm_model: llama3.1:8b
+  embedding_model: nomic-embed-text
+
+chroma:
+  host: localhost
+  port: 8000
+  collection: iam-metadata
+
+toolbox:
+  url: http://127.0.0.1:5000
+
+ui:
+  title: IAM Access Assistant
+
+entities:
+  user:
+    table: Users
+    id_column: UserID
+    name_column: UserName
+    error: Invalid user
+
+  application:
+    table: Applications
+    id_column: AppID
+    name_column: AppName
+    error: Invalid app
+
+  role:
+    table: Roles
+    id_column: RoleID
+    name_column: RoleName
+    error: Invalid role

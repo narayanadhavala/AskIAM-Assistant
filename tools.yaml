@@ -1,0 +1,18 @@
+sources:
+  mysql:
+    kind: mysql
+    host: 127.0.0.1
+    port: 3306
+    database: iamdb
+    user: root
+    password: root123
+
+tools:
+  iam-execute-sql:
+    kind: mysql-execute-sql
+    source: mysql
+    description: Execute SQL for IAM validation against Users, Applications, and Roles tables.
+
+toolsets:
+  iam:
+    - iam-execute-sql
