@@ -10,7 +10,6 @@ The AskIAM Assistant provides an intelligent chatbot interface for validating IA
 - **RAG Engine**: Vector search on IAM metadata using ChromaDB
 - **LLM Processing**: Natural language understanding via Ollama
 - **MCP Tools**: SQL generation and validation for entity verification
-- **Comprehensive Tracing**: Full execution trace logging for audit purposes
 
 ---
 
@@ -26,9 +25,9 @@ The AskIAM Assistant provides an intelligent chatbot interface for validating IA
 
 ```
 AskIAM-Assistant/
-├── backend/                         # Main application (current active version)
+├── backend/                         # Main application
 │   ├── app.py                       # Gradio UI entry point
-│   ├── orchestrator.py              # Request routing (RAG → MCP)
+│   ├── langgraph_pipeline.py        # LangGraph orchestration
 │   ├── config.yaml                  # Configuration (LLM, ChromaDB, tools)
 │   ├── requirements.txt             # Python dependencies
 │   ├── core/                        # Core utilities
@@ -36,10 +35,9 @@ AskIAM-Assistant/
 │   │   ├── model_factory.py         # LLM & embeddings factory
 │   │   └── types.py                 # Type definitions
 │   ├── mcp/                         # Model Context Protocol tools
-│   │   ├── trace.py                 # Trace handler & session manager
 │   │   ├── extract.py               # Request extraction
 │   │   ├── validators.py            # Entity validation
-│   │   ├── graph.py                 # MCP orchestration
+│   │   ├── state.py                 # State management
 │   │   └── tools/
 │   │       ├── entity_validator.py  # Generic entity validator
 │   │       ├── sql_generator.py     # SQL generation tool
@@ -48,15 +46,16 @@ AskIAM-Assistant/
 │       ├── rag_engine.py            # RAG similarity search & LLM validation
 │       └── vectorstore.py           # ChromaDB vector store initialization
 │
-├── database/                        # Database setup
-│   ├── iam_sample_data.sql         # Sample IAM data (Users, Apps, Roles)
-│   └── chromaDB/
-│       ├── ingest.py               # Ingest IAM data into ChromaDB
-│       └── test-chroma.py          # Test ChromaDB queries
+├── database/                        # Database scripts
+│   ├── iam_sample_data.sql          # Sample IAM data
+│   └── chromaDB/                    # ChromaDB ingestion
+│       ├── ingest.py                # Ingest IAM metadata to vector store
+│       └── test-chroma.py           # Test ChromaDB queries
 │
-├── ReadME.md                        
+├── docker-compose.yml               # Docker services configuration
 ├── requirements.txt                 # Root-level dependencies
-└── tools.yaml                       # MCP toolbox configuration
+├── tools.yaml                       # MCP toolbox configuration
+└── ReadME.md                        
 
 ```
 
@@ -66,7 +65,7 @@ AskIAM-Assistant/
 
 - **OS**: Linux/macOS/Windows (Linux recommended)
 - **Python**: 3.9+
-- **Docker**: For MySQL, ChromaDB, Toolbox
+- **Docker**: For PostgreSQL, ChromaDB, Toolbox
 - **Ollama**: For running LLMs locally
 
 ---
@@ -77,7 +76,7 @@ AskIAM-Assistant/
 
 ```bash
 cd /path/to/AskIAM-Assistant
-cd backend  # Enter the main application directory
+cd backend
 ```
 
 ### Step 2: Install Python Dependencies
@@ -88,43 +87,15 @@ pip install -r requirements.txt
 
 ### Step 3: Start Docker Services
 
-#### 3.1 MySQL Database
-
 ```bash
-docker pull mysql:8.0
-docker run -d --name iam-mysql \
-  -e MYSQL_ROOT_PASSWORD=root123 \
-  -p 3306:3306 \
-  mysql:8.0
-
-# Wait 30 seconds for initialization
-sleep 30
-
-# Load sample data
-mysql -h 127.0.0.1 -u root -proot123 < ../database/iam_sample_data.sql
-
-# To Access the MySQL server
-docker exec -it iam-mysql mysql -u root -proot123
+# Start all required services
+docker-compose up -d
 ```
 
-#### 3.2 ChromaDB (Vector Store)
-
-```bash
-docker pull chromadb/chroma:latest
-docker run -d --name chromadb \
-  -p 8000:8000 \
-  chromadb/chroma:latest
-```
-
-#### 3.3 Toolbox (MCP Server for SQL Execution)
-
-```bash
-docker run -d --name iam-toolbox \
-  -p 5000:5000 \
-  --network host \
-  -v "$(pwd)/../tools.yaml:/app/tools.yaml" \
-  us-central1-docker.pkg.dev/database-toolbox/toolbox/toolbox:0.23.0
-```
+This starts:
+- **PostgreSQL**: IAM database (port 5432)
+- **ChromaDB**: Vector store (port 8000)
+- **IAM Toolbox**: MCP server for SQL execution
 
 ### Step 4: Start Ollama
 
@@ -132,19 +103,37 @@ In a separate terminal:
 
 ```bash
 ollama serve
+```
 
-# In another terminal, pull required models
+In another terminal, pull the required models:
+
+```bash
 ollama pull nomic-embed-text
 ollama pull llama3.1:8b
 ```
 
 ### Step 5: Ingest IAM Data into ChromaDB
 
+From the backend directory:
+
 ```bash
 python ../database/chromaDB/ingest.py
 ```
 
-### Step 6: Start the Application
+### Step 6: Verify Services
+
+Check that all services are running:
+
+```bash
+# Check Docker containers
+docker ps
+
+# Expected: iam-postgres, chromadb, iam-toolbox containers running
+```
+
+### Step 7: Start the Application
+
+From the backend directory:
 
 ```bash
 python app.py
@@ -159,63 +148,38 @@ The app will launch on `http://localhost:7860`
 ```
 User Query
     ↓
-[Orchestrator] (orchestrator.py)
-    ├─→ [RAG Validation] (rag_engine.py)
+[LangGraph Pipeline] (langgraph_pipeline.py)
+    ├─→ [1] Initialize Request
+    ├─→ [2] Extract Entities (extract.py)
+    │   └─→ Parse user, application, and role
+    ├─→ [3] RAG Validation (rag_engine.py)
     │   ├─→ Vector similarity search (ChromaDB)
-    │   ├─→ LLM decision (Ollama)
-    │   └─→ Return (if confident)
+    │   ├─→ LLM-based decision (Ollama)
+    │   └─→ Output: VALID/INVALID
     │
-    ├─→ [MCP Validation] (graph.py)
-    │   ├─→ Extract request parameters (extract.py)
-    │   ├─→ Validate entities (validators.py)
-    │   │   ├─→ Generate SQL (sql_generator.py)
-    │   │   ├─→ Validate SQL (sql_validator.py)
-    │   │   └─→ Execute via Toolbox
-    │   └─→ Return result
+    ├─→ [4] Decision Gate (decide_rag_path)
+    │   │
+    │   ├─ If RAG = VALID ──────────────────┐
+    │   │                                   │
+    │   └─ If RAG ≠ VALID ──┐               │
+    │                       ↓               │
+    │                [5] MCP Validation     │
+    │                (validators.py)        │
+    │                ├─→ Generate SQL       │
+    │                ├─→ Validate SQL       │
+    │                ├─→ Execute via        │
+    │                │   Toolbox/Database   │
+    │                └─→ PASSED/FAILED      │
+    │                       │               │
+    │                       └───────────────┤
+    │                                       │
+    ├─→ [6] Finalize Response ←─────────────┤
+    │   ├─→ Determine final decision
+    │   └─→ Generate response message
     │
     └─→ [Response to User]
-         └─→ [Full Trace Logged] (trace.py)
-```
-
----
-
-## 🔍 Tracing System
-
-The application includes comprehensive execution tracing:
-
-### During Active Session
-- Individual steps printed to console
-- Shows tool calls with inputs/outputs
-- Real-time feedback on validation process
-
-### On Session End
-- Complete accumulated trace printed
-- Includes all requests from the session
-- Exported to JSON with full details
-
-### Trace File Location
-- Default: `iam_trace_chat_session_YYYYMMDD_HHMMSS.json`
-- Cache file: `.trace_session_cache` (tracks current session)
-
-### Example Trace Structure
-```json
-{
-  "session_timestamp": "2026-01-12T07:33:44",
-  "total_requests": 2,
-  "total_steps": 4,
-  "stack": [
-    {
-      "step": 1,
-      "tool": "rag_similarity_search",
-      "input": { "query": "I need HR Analyst in Workday", "k": 1 },
-      "output": "Retrieved 1 document(s): [...]"
-    },
-    ...
-  ]
-}
-```
-
----
+        └─→ VALID: User can access resource
+            INVALID: User cannot access resource
 
 ## 🔧 Configuration
 
@@ -260,17 +224,6 @@ entities:
 3. View the response (VALID or INVALID)
 4. On app close, see the full session trace printed
 
-### Command Line (Testing)
-
-```bash
-# Direct Python import
-python -c "
-from orchestrator import handle_request
-result = handle_request('I need HR Analyst in Workday')
-print(result)
-"
-```
-
 ---
 
 ## ✅ Validation Checklist
@@ -280,7 +233,7 @@ Before running the app:
 - [ ] Python 3.9+ installed
 - [ ] Docker running (all 3 containers up)
 - [ ] Ollama running with models pulled
-- [ ] MySQL has sample data (`SELECT * FROM iamdb.Users`)
+- [ ] PostgreSQL has sample data (`docker exec iam-postgres psql -U postgres -d iamdb -c "SELECT * FROM users"`)
 - [ ] ChromaDB has ingested data (run ingest.py)
 - [ ] Toolbox is responding (`curl http://127.0.0.1:5000`)
 
@@ -298,24 +251,19 @@ Before running the app:
 - **SQL Validator**: Prevents SQL injection
 - **Entity Validator**: Checks Users/Apps/Roles tables
 
-### Trace System (`mcp/trace.py`)
-- `MCPTraceHandler`: Captures tool execution
-- `TraceManager`: Singleton session management
-- Automatic JSON export on request completion
-
 ---
 
 ## 📚 Key Files Explained
 
 | File | Purpose |
 |------|---------|
-| `app.py` | Gradio UI + session lifecycle |
-| `orchestrator.py` | Routes requests to RAG or MCP |
+| `app.py` | Gradio UI entry point |
+| `langgraph_pipeline.py` | LangGraph orchestration & state management |
 | `rag_engine.py` | Vector search + LLM validation |
-| `graph.py` | MCP orchestration & pipeline |
-| `extract.py` | NLU for request parameters |
+| `extract.py` | NLU for request parameter extraction |
 | `validators.py` | Entity validation pipeline |
-| `trace.py` | Consolidated tracing system |
+| `sql_generator.py` | Safe SQL query generation |
+| `sql_validator.py` | SQL safety validation |
 | `config.yaml` | All service configurations |
 
 ---
@@ -325,14 +273,8 @@ Before running the app:
 ### Stop All Services
 
 ```bash
-docker stop iam-mysql chromadb iam-toolbox
-docker rm iam-mysql chromadb iam-toolbox
-```
-
-### Clean Trace Files
-
-```bash
-rm -f iam_trace*.json .trace_session_cache
+docker stop iam-postgres chromadb iam-toolbox
+docker rm iam-postgres chromadb iam-toolbox
 ```
 
 ---
@@ -341,9 +283,8 @@ rm -f iam_trace*.json .trace_session_cache
 
 - Keep Docker running while using the app
 - Ollama must be active before starting the application
-- Trace files persist between sessions (useful for auditing)
-- Use `.gitignore` to ignore trace files and cache
 - Configuration is YAML-based for easy customization
+- All services are defined in `docker-compose.yml` for easy management
 
 ---
 
@@ -352,19 +293,20 @@ rm -f iam_trace*.json .trace_session_cache
 - All SQL queries are validated before execution
 - Only SELECT statements allowed (no INSERT/UPDATE/DELETE)
 - Queries restricted to specific tables (Users, Apps, Roles)
-- LLM decisions can be audited via trace logs
+- LLM decisions are based on validated entity data
 
 ---
 
 ## 📞 Support
 
 For issues:
-1. Check the trace output for detailed execution logs
-2. Review `config.yaml` for service URLs
-3. Verify all Docker containers are running
-4. Check Ollama model availability
+1. Review `config.yaml` for service URLs and settings
+2. Verify all Docker containers are running: `docker ps`
+3. Check Ollama model availability: `ollama list`
+4. Verify PostgreSQL has sample data: `docker exec iam-postgres psql -U postgres -d iamdb -c "SELECT * FROM users"`
+5. Check ChromaDB ingestion: `python ../database/chromaDB/ingest.py`
 
 ---
 
-**Last Updated**: January 12, 2026  
-**Version**: 2.0 (RAG + MCP Pipeline)
+**Last Updated**: January 20, 2026  
+**Version**: 3.0

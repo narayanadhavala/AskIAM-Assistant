@@ -1,13 +1,14 @@
 from core.types import IAMState
 from core.config_loader import load_config
 from mcp.tools.entity_validator import validate_entity_tool
-from mcp.trace import get_trace_handler
+from mcp.tools.sql_generator import generate_sql_tool
+from mcp.tools.sql_validator import validate_sql_tool
+from toolbox_langchain import ToolboxClient
 
 
 def run_validations(state: IAMState) -> IAMState:
     cfg = load_config()
     entities = cfg["entities"]
-    trace_handler = get_trace_handler()
 
     try:
         for key, entity in entities.items():
@@ -15,36 +16,76 @@ def run_validations(state: IAMState) -> IAMState:
             
             # Skip validation if value is None (not extracted)
             if value is None:
-                trace_handler.on_tool_start(
-                    {"name": f"validate_entity_tool ({entity['table']})"},
-                    f"Skipped: value is None"
-                )
-                trace_handler.on_tool_end(f"Skipped validation: {key}_name not extracted")
                 continue
 
-            # Log tool start
+            # Validate entity
             tool_input = {
                 "table": entity["table"],
                 "id_column": entity["id_column"],
                 "name_column": entity["name_column"],
                 "value": value,
             }
-            trace_handler.on_tool_start(
-                {"name": f"validate_entity_tool ({entity['table']})"},
-                str(tool_input)
-            )
 
             result = validate_entity_tool.invoke(tool_input)
-            
-            # Log tool end
-            trace_handler.on_tool_end(str(result))
 
             if not result:
                 state["error"] = entity["error"]
                 return state
 
+        # After individual entity validations, check relationships
+        # Specifically: Role must belong to the requested Application
+        if state.get("role_name") and state.get("application_name"):
+            state = _validate_role_application_relationship(state)
+            if state.get("error"):
+                return state
+
     except Exception as e:
         state["error"] = str(e)
-        trace_handler.on_tool_end(f"Error: {state['error']}")
 
     return state
+
+
+def _validate_role_application_relationship(state: IAMState) -> IAMState:
+    """
+    Validate that the requested Role actually belongs to the requested Application.
+    
+    This checks the foreign key relationship in the Roles table where AppName
+    must match the requested application_name.
+    """
+    cfg = load_config()
+    
+    role_name = state.get("role_name")
+    app_name = state.get("application_name")
+    
+    # Build SQL to check if role belongs to the application
+    sql_instruction = (
+        f"Generate a SQL query that selects RoleID from Roles "
+        f"where RoleName = '{role_name}' AND AppName = '{app_name}' LIMIT 1"
+    )
+    
+    try:
+        sql = generate_sql_tool.invoke({"instruction": sql_instruction})
+        
+        validate_sql_tool.invoke(
+            {"sql": sql, "allowed_table": "Roles"}
+        )
+        
+        cfg = load_config()
+        with ToolboxClient(cfg["toolbox"]["url"]) as client:
+            sql_tool = client.load_toolset("iam")[0]
+            result = sql_tool.invoke({"sql": sql})
+        
+        # Check if result is empty
+        if result and result != "[]" and result != "null" and result.strip() != "":
+            return state
+        else:
+            # Relationship invalid
+            state["error"] = (
+                f"Relationship invalid: {role_name} does not exist in {app_name}. "
+                f"This role may belong to a different application."
+            )
+            return state
+            
+    except Exception as e:
+        state["error"] = f"Relationship validation error: {str(e)}"
+        return state

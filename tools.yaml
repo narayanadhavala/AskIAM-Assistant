@@ -1,16 +1,16 @@
 sources:
-  mysql:
-    kind: mysql
-    host: 127.0.0.1
-    port: 3306
+  postgres:
+    kind: postgres
+    host: iam-postgres
+    port: 5432
     database: iamdb
-    user: root
-    password: root123
+    user: postgres
+    password: postgres
 
 tools:
   iam-execute-sql:
-    kind: mysql-execute-sql
-    source: mysql
+    kind: postgres-execute-sql
+    source: postgres
     description: Execute SQL for IAM validation against Users, Applications, and Roles tables.
 
 toolsets:

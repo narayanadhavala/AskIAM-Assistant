@@ -12,11 +12,11 @@ chroma:
   collection: iam-metadata
 
 database:
-  host: localhost
-  port: 3306
-  user: root
-  password: root123
-  database: iam_demo
+  host: iam-postgres
+  port: 5432
+  user: postgres
+  password: postgres
+  database: iamdb
 
 toolbox:
   url: http://127.0.0.1:5000

@@ -21,26 +21,18 @@ vectordb = Chroma(
     embedding_function=embeddings
 )
 
-# # Simple similarity search
-# results = vectordb.similarity_search(
-#     "HR Analyst role in Workday",
-#     k=2
-# )
-
-# for i, doc in enumerate(results, 1):
-#     print(f"\nResult {i}")
-#     print("Content:", doc.page_content)
-#     print("Metadata:", doc.metadata)
-
 queries = [
-    "Who owns the HR Analyst role?",
-    "Workday HR role",
-    "Give me HR access in Workday",
-    "Role for HR team in Workday"
+    "I need access to the HR Analyst role in the Workday application"
+    #"I need access to the Payroll Admin role in the Salesforce application",
+    #"I'm Kevin.Liu and I need access for IT Admin role for Azure AD"
 ]
 
 for q in queries:
     print(f"\nQuery: {q}")
-    results = vectordb.similarity_search(q, k=1)
-    print(results[0].page_content)
-    print(results[0].metadata)
+    results = vectordb.similarity_search(q, k=2)
+    for i in range(len(results)):
+        if not results:
+            print("No results found for query: {}".format(q))
+        else:
+            print("Content:", results[i].page_content)
+            print("Metadata:", results[i].metadata)

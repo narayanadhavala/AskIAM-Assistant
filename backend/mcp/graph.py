@@ -1,12 +1,8 @@
 from core.types import IAMState
 from mcp.extract import extract_request
 from mcp.validators import run_validations
-from mcp.trace import get_trace_handler
 
 def run_mcp(text: str) -> str:
-    trace_handler = get_trace_handler()
-    trace_handler.reset()
-    
     state: IAMState = {
         "raw_request": text,
         "user_name": None,

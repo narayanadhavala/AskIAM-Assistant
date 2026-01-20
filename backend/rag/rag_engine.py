@@ -1,50 +1,44 @@
 from core.model_factory import create_llm
 from rag.vectorstore import load_vectordb
-from mcp.trace import get_trace_handler
 
 _vectordb = None
 _llm = None
 
-def validate_with_rag(text: str, k=3) -> str | None:
+def validate_with_rag(text: str, k=3, filter=None) -> str | None:
     global _vectordb, _llm
-    trace_handler = get_trace_handler()
 
     if _vectordb is None:
         _vectordb = load_vectordb()
     if _llm is None:
         _llm = create_llm()
 
-    # Log RAG search start
-    trace_handler.on_tool_start(
-        {"name": "rag_similarity_search"},
-        {"query": text, "k": k}
-    )
-    
-    results = _vectordb.similarity_search(text, k=k)
+    # Build search filter from metadata fields
+    search_filter = None
+    if filter:
+        # Build Chroma where filter from metadata dict
+        # Filter out None values
+        filter_dict = {k: v for k, v in filter.items() if v is not None}
+        if filter_dict:
+            # Chroma supports multiple filter formats
+            # For simple AND conditions with multiple fields
+            conditions = []
+            for field_key, field_val in filter_dict.items():
+                conditions.append({field_key: {"$eq": field_val}})
+            
+            if len(conditions) == 1:
+                search_filter = conditions[0]
+            else:
+                search_filter = {"$and": conditions}
+
+    # Perform similarity search with optional filter
+    results = _vectordb.similarity_search(text, k=k, filter=search_filter) if search_filter else _vectordb.similarity_search(text, k=k)
     
     if not results:
-        trace_handler.on_tool_end("No results found")
         return None
 
-    # Log retrieved documents
-    retrieved_docs = [
-        {
-            "content": d.page_content,
-            "metadata": d.metadata if hasattr(d, 'metadata') else {}
-        }
-        for d in results
-    ]
-    
+    # Extract context from results
     context = "\n".join(d.page_content for d in results)
-    
-    trace_handler.on_tool_end(f"Retrieved {len(results)} document(s): {retrieved_docs}")
 
-    # Log LLM validation
-    trace_handler.on_tool_start(
-        {"name": "rag_llm_validation"},
-        {"query": text, "context_length": len(context)}
-    )
-    
     prompt = f"""
 You are an IAM access validation assistant.
 
@@ -62,9 +56,7 @@ Rules:
 
     try:
         out = _llm.invoke(prompt).content.strip()
-        trace_handler.on_tool_end({"response": out})
     except Exception as e:
-        trace_handler.on_tool_end(f"Error: {str(e)}")
         return None
 
     if out.startswith("VALID") or out.startswith("INVALID"):

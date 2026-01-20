@@ -1,22 +1,23 @@
-import mysql.connector
+import psycopg2
+import psycopg2.extras
 import chromadb
 from langchain_core.documents import Document
 from langchain_ollama import OllamaEmbeddings
 from langchain_chroma import Chroma
 
-# MySQL connection
-conn = mysql.connector.connect(
-    host="127.0.0.1",
-    user="root",
-    password="root123",
+# PostgreSQL connection
+conn = psycopg2.connect(
+    host="localhost",
+    user="postgres",
+    password="postgres",
     database="iamdb"
 )
-cursor = conn.cursor(dictionary=True)
+cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
 documents = []
 
 # Roles
-cursor.execute("SELECT * FROM Roles")
+cursor.execute('SELECT * FROM "Roles"')
 for row in cursor.fetchall():
     documents.append(
         Document(
@@ -30,7 +31,7 @@ for row in cursor.fetchall():
     )
 
 # Users
-cursor.execute("SELECT * FROM Users")
+cursor.execute('SELECT * FROM "Users"')
 for row in cursor.fetchall():
     documents.append(
         Document(
@@ -44,7 +45,7 @@ for row in cursor.fetchall():
     )
 
 # Applications
-cursor.execute("SELECT * FROM Applications")
+cursor.execute('SELECT * FROM "Applications"')
 for row in cursor.fetchall():
     documents.append(
         Document(
@@ -67,6 +68,12 @@ client = chromadb.HttpClient(
     host="localhost",
     port=8000
 )
+
+client.delete_collection("iam-metadata")
+print("Collection iam-metadata deleted")
+
+collections = client.list_collections()
+print([c.name for c in collections])
 
 # Vector store
 vectordb = Chroma(
