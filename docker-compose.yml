@@ -17,6 +17,8 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    networks:
+      - iam-network
 
   chromadb:
     image: chromadb/chroma:latest
@@ -24,13 +26,27 @@ services:
     restart: unless-stopped
     ports:
       - "8000:8000"
+    networks:
+      - iam-network
 
   iam-toolbox:
     image: us-central1-docker.pkg.dev/database-toolbox/toolbox/toolbox:0.23.0
     container_name: iam-toolbox
     restart: unless-stopped
+    ports:
+      - "5000:5000"
     volumes:
       - /home/narayana/Desktop/Materials/AskIAM-Assistant/tools.yaml:/app/tools.yaml:ro
+    command: 
+      - "--tools-file=/app/tools.yaml"
+      - "--address=0.0.0.0"
+      - "--port=5000"
+    networks:
+      - iam-network
 
 volumes:
   postgres_data:
+
+networks:
+  iam-network:
+    driver: bridge
