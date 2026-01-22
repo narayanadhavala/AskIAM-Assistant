@@ -10,6 +10,7 @@ The AskIAM Assistant provides an intelligent chatbot interface for validating IA
 - **RAG Engine**: Vector search on IAM metadata using ChromaDB
 - **LLM Processing**: Natural language understanding via Ollama
 - **MCP Tools**: SQL generation and validation for entity verification
+- **Langfuse Observability**: Optional LLM tracing, audit logging, and compliance tracking
 
 ---
 

@@ -21,6 +21,27 @@ database:
 toolbox:
   url: http://127.0.0.1:5000
 
+langfuse:
+  enabled: true
+  # Get credentials from environment variables first, then fall back to config
+  public_key: ${LANGFUSE_PUBLIC_KEY}
+  secret_key: ${LANGFUSE_SECRET_KEY}
+  base_url: ${LANGFUSE_BASE_URL}
+  # Tracing options
+  tracing:
+    enabled: true
+    capture_input: true
+    capture_output: true
+    capture_metadata: true
+  # Session management
+  sessions:
+    enabled: true
+    # Set session ID for multi-turn conversations
+    session_id_key: "session_id"
+  # Environment tagging
+  environment: "development"  # Set to "production" in prod
+  version: "1.0.0"
+
 ui:
   title: IAM Access Assistant
 

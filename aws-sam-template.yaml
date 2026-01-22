@@ -1,0 +1,934 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+
+Description: 'AskIAM Assistant - Serverless IAM Access Validation on AWS'
+
+Metadata:
+  AWS::ServerlessRepo::Application:
+    Name: ask-iam-assistant
+    Description: Serverless IAM access validation system using Lambda, RDS, OpenSearch
+    Author: AskIAM Team
+    SpdxLicenseId: MIT
+    LicenseUrl: LICENSE
+    ReadmeUrl: AWS_ARCHITECTURE.md
+    Labels: ['iam', 'serverless', 'lambda', 'rds', 'opensearch']
+    HomePageUrl: https://github.com/askiam/ask-iam-assistant
+    SemanticVersion: 1.0.0
+
+Parameters:
+  Environment:
+    Type: String
+    Default: prod
+    AllowedValues: [dev, staging, prod]
+    Description: Environment name
+  
+  VpcCIDR:
+    Type: String
+    Default: 10.0.0.0/16
+    Description: VPC CIDR block
+  
+  PrivateSubnetCIDR:
+    Type: String
+    Default: 10.0.1.0/24
+    Description: Private subnet CIDR block
+  
+  DBInstanceIdentifier:
+    Type: String
+    Default: ask-iam-db
+    Description: RDS instance identifier
+  
+  DBUsername:
+    Type: String
+    Default: iamadmin
+    NoEcho: true
+    Description: Database master username
+  
+  DBPassword:
+    Type: String
+    NoEcho: true
+    Description: Database master password (minimum 8 characters)
+    MinLength: 8
+  
+  OpenSearchDomainName:
+    Type: String
+    Default: ask-iam-search
+    Description: OpenSearch Serverless collection name
+  
+  LambdaMemorySize:
+    Type: Number
+    Default: 512
+    AllowedValues: [128, 256, 512, 1024, 2048]
+    Description: Lambda memory allocation
+
+Globals:
+  Function:
+    Timeout: 60
+    Runtime: python3.11
+    Architectures: [arm64]
+    Environment:
+      Variables:
+        ENVIRONMENT: !Ref Environment
+        LOG_LEVEL: INFO
+        DB_ENDPOINT: !GetAtt RDSCluster.Endpoint.Address
+        DB_PORT: 5432
+        DB_NAME: iamdb
+        DB_USER: !Ref DBUsername
+        OPENSEARCH_ENDPOINT: !GetAtt OpenSearchCollection.CollectionEndpoint
+        SECRETS_MANAGER_PREFIX: !Sub '/askiam/${Environment}'
+        PARAMETER_STORE_PREFIX: !Sub '/askiam/${Environment}'
+    Layers:
+      - !Ref PythonDependenciesLayer
+
+Resources:
+  # ============================================================================
+  # VPC & NETWORKING
+  # ============================================================================
+  
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCIDR
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-vpc'
+
+  PrivateSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PrivateSubnetCIDR
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-private-subnet'
+
+  # VPC Endpoint for Secrets Manager (to avoid NAT gateway costs)
+  SecretsManagerEndpoint:
+    Type: AWS::EC2::VpcEndpoint
+    Properties:
+      VpcId: !Ref VPC
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.secretsmanager'
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !Ref PrivateSubnet
+      SecurityGroupIds:
+        - !Ref LambdaSecurityGroup
+
+  # VPC Endpoint for Systems Manager Parameter Store
+  ParameterStoreEndpoint:
+    Type: AWS::EC2::VpcEndpoint
+    Properties:
+      VpcId: !Ref VPC
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ssm'
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !Ref PrivateSubnet
+      SecurityGroupIds:
+        - !Ref LambdaSecurityGroup
+
+  # Security group for Lambda functions
+  LambdaSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for AskIAM Lambda functions
+      VpcId: !Ref VPC
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: HTTPS for AWS services
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          DestinationSecurityGroupId: !Ref RDSSecurityGroup
+          Description: PostgreSQL to RDS
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-lambda-sg'
+
+  # Security group for RDS
+  RDSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for RDS Aurora
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          SourceSecurityGroupId: !Ref LambdaSecurityGroup
+          Description: PostgreSQL from Lambda
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-rds-sg'
+
+  # ============================================================================
+  # RDS AURORA (POSTGRESQL)
+  # ============================================================================
+
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Subnet group for RDS Aurora
+      SubnetIds:
+        - !Ref PrivateSubnet
+        - !Ref PrivateSubnetAZ2  # For multi-AZ
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-db-subnet-group'
+
+  PrivateSubnetAZ2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.2.0/24
+      AvailabilityZone: !Select [1, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-private-subnet-az2'
+
+  RDSCluster:
+    Type: AWS::RDS::DBCluster
+    DeletionPolicy: Snapshot
+    Properties:
+      Engine: aurora-postgresql
+      EngineVersion: 15.2
+      EngineMode: provisioned
+      DatabaseName: iamdb
+      MasterUsername: !Ref DBUsername
+      MasterUserPassword: !Ref DBPassword
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      VpcSecurityGroupIds:
+        - !Ref RDSSecurityGroup
+      StorageEncrypted: true
+      BackupRetentionPeriod: 30
+      PreferredBackupWindow: 03:00-04:00
+      PreferredMaintenanceWindow: sun:04:00-sun:05:00
+      EnableCloudwatchLogsExports:
+        - postgresql
+      EnableIAMDatabaseAuthentication: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-db-cluster'
+
+  RDSPrimaryInstance:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceIdentifier: !Sub '${DBInstanceIdentifier}-primary'
+      DBInstanceClass: db.serverless
+      Engine: aurora-postgresql
+      DBClusterIdentifier: !Ref RDSCluster
+      PubliclyAccessible: false
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-db-primary'
+
+  RDSSecondaryInstance:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceIdentifier: !Sub '${DBInstanceIdentifier}-secondary'
+      DBInstanceClass: db.serverless
+      Engine: aurora-postgresql
+      DBClusterIdentifier: !Ref RDSCluster
+      PubliclyAccessible: false
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-db-secondary'
+
+  # ============================================================================
+  # OPENSEARCH SERVERLESS
+  # ============================================================================
+
+  OpenSearchSecurityPolicy:
+    Type: AWS::OpenSearchServerless::SecurityPolicy
+    Properties:
+      Name: ask-iam-security-policy
+      Type: encryption
+      Description: Encryption policy for AskIAM OpenSearch
+      Policy: |
+        {
+          "Rules": [
+            {
+              "ResourceType": "collection",
+              "Resource": ["collection/ask-iam-*"]
+            }
+          ],
+          "AWSOwnedKey": true
+        }
+
+  OpenSearchNetworkPolicy:
+    Type: AWS::OpenSearchServerless::SecurityPolicy
+    Properties:
+      Name: ask-iam-network-policy
+      Type: network
+      Description: Network policy for AskIAM OpenSearch
+      Policy: |
+        [
+          {
+            "Rules": [
+              {
+                "ResourceType": "collection",
+                "Resource": ["collection/ask-iam-*"]
+              }
+            ],
+            "AllowFromPublic": false,
+            "SourceVPCEs": []
+          }
+        ]
+
+  OpenSearchCollection:
+    Type: AWS::OpenSearchServerless::Collection
+    DependsOn:
+      - OpenSearchSecurityPolicy
+      - OpenSearchNetworkPolicy
+    Properties:
+      Name: !Ref OpenSearchDomainName
+      Type: SEARCH
+      Description: OpenSearch Serverless collection for IAM metadata and vector search
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-opensearch'
+
+  OpenSearchDataAccessPolicy:
+    Type: AWS::OpenSearchServerless::AccessPolicy
+    Properties:
+      Name: ask-iam-data-access-policy
+      Type: data
+      Description: Data access policy for Lambda functions
+      Policy: !Sub |
+        [
+          {
+            "Rules": [
+              {
+                "ResourceType": "collection",
+                "Resource": ["collection/${OpenSearchDomainName}"],
+                "Permission": ["aoss:CreateCollectionItems", "aoss:UpdateCollectionItems", "aoss:DescribeCollectionItems", "aoss:GetCollectionItems", "aoss:DeleteCollectionItems"]
+              },
+              {
+                "ResourceType": "index",
+                "Resource": ["index/${OpenSearchDomainName}/*"],
+                "Permission": ["aoss:CreateIndex", "aoss:UpdateIndex", "aoss:DescribeIndex", "aoss:DeleteIndex", "aoss:ReadDocument", "aoss:WriteDocument"]
+              }
+            ],
+            "Principal": ["${LambdaExecutionRole.Arn}"]
+          }
+        ]
+
+  # ============================================================================
+  # SECRETS MANAGER & PARAMETER STORE
+  # ============================================================================
+
+  DBSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub '/askiam/${Environment}/db/password'
+      Description: RDS Aurora database password
+      SecretString: !Sub |
+        {
+          "username": "${DBUsername}",
+          "password": "${DBPassword}",
+          "engine": "postgresql",
+          "host": "${RDSCluster.Endpoint.Address}",
+          "port": 5432,
+          "dbname": "iamdb"
+        }
+
+  LLMAPIKeySecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub '/askiam/${Environment}/llm/api-key'
+      Description: LLM API key (e.g., OpenAI, Ollama token)
+      SecretString: '{"api_key": "placeholder-replace-in-console"}'
+
+  JWTSecretKey:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub '/askiam/${Environment}/jwt/secret'
+      Description: JWT signing secret for API authentication
+      SecretString: !Sub |
+        {
+          "secret_key": "${AWS::StackName}-${AWS::AccountId}-jwt-secret"
+        }
+
+  RAGThresholdParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub '/askiam/${Environment}/app/rag-threshold'
+      Type: String
+      Value: '0.95'
+      Description: RAG confidence threshold for validation
+
+  AuditEnabledParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub '/askiam/${Environment}/app/audit-enabled'
+      Type: String
+      Value: 'true'
+      Description: Enable audit logging for all validation requests
+
+  LexBotIdParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub '/askiam/${Environment}/lex/bot-id'
+      Type: String
+      Value: !Ref LexBot
+      Description: Lex bot ID
+
+  # ============================================================================
+  # IAM ROLES & POLICIES
+  # ============================================================================
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess
+      Policies:
+        - PolicyName: RDSAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - rds-db:connect
+                Resource: !Sub 'arn:aws:rds-db:${AWS::Region}:${AWS::AccountId}:dbuser:*/iamadmin'
+        - PolicyName: OpenSearchAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - aoss:APIAll
+                Resource: !GetAtt OpenSearchCollection.CollectionArn
+        - PolicyName: SecretsAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:/askiam/${Environment}/*'
+        - PolicyName: ParameterStoreAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                  - ssm:GetParameters
+                Resource: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/askiam/${Environment}/*'
+        - PolicyName: LambdaInvoke
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource: !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:ask-iam-*'
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-lambda-role'
+
+  # ============================================================================
+  # PYTHON DEPENDENCIES LAYER
+  # ============================================================================
+
+  PythonDependenciesLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: ask-iam-python-dependencies
+      Description: Shared Python dependencies for AskIAM Lambda functions
+      ContentUri: lambda/layers/python-dependencies/
+      CompatibleRuntimes:
+        - python3.11
+      RetentionPolicy: Delete
+
+  # ============================================================================
+  # LAMBDA FUNCTIONS
+  # ============================================================================
+
+  RequestOrchestratorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'ask-iam-request-orchestrator-${Environment}'
+      CodeUri: lambda/request_orchestrator/
+      Handler: handler.lambda_handler
+      Runtime: python3.11
+      MemorySize: !Ref LambdaMemorySize
+      Timeout: 60
+      ReservedConcurrentExecutions: 1000
+      EphemeralStorage:
+        Size: 512
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action: lambda:InvokeFunction
+              Resource:
+                - !GetAtt EntityExtractorFunction.Arn
+                - !GetAtt RAGValidatorFunction.Arn
+                - !GetAtt MCPValidatorFunction.Arn
+                - !GetAtt AuditLoggerFunction.Arn
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref LambdaSecurityGroup
+        SubnetIds:
+          - !Ref PrivateSubnet
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties:
+            RestApiId: !Ref APIGateway
+            Path: /access-request
+            Method: POST
+        LexEvent:
+          Type: Api
+          Properties:
+            RestApiId: !Ref APIGateway
+            Path: /lex-webhook
+            Method: POST
+      Tracing: Active
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-request-orchestrator'
+
+  EntityExtractorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'ask-iam-entity-extractor-${Environment}'
+      CodeUri: lambda/entity_extractor/
+      Handler: handler.lambda_handler
+      Runtime: python3.11
+      MemorySize: 256
+      Timeout: 30
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref LambdaSecurityGroup
+        SubnetIds:
+          - !Ref PrivateSubnet
+      Tracing: Active
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-entity-extractor'
+
+  RAGValidatorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'ask-iam-rag-validator-${Environment}'
+      CodeUri: lambda/rag_validator/
+      Handler: handler.lambda_handler
+      Runtime: python3.11
+      MemorySize: 1024
+      Timeout: 45
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref LambdaSecurityGroup
+        SubnetIds:
+          - !Ref PrivateSubnet
+      Tracing: Active
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-rag-validator'
+
+  MCPValidatorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'ask-iam-mcp-validator-${Environment}'
+      CodeUri: lambda/mcp_validator/
+      Handler: handler.lambda_handler
+      Runtime: python3.11
+      MemorySize: 256
+      Timeout: 30
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref LambdaSecurityGroup
+        SubnetIds:
+          - !Ref PrivateSubnet
+      Tracing: Active
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-mcp-validator'
+
+  AuditLoggerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'ask-iam-audit-logger-${Environment}'
+      CodeUri: lambda/audit_logger/
+      Handler: handler.lambda_handler
+      Runtime: python3.11
+      MemorySize: 256
+      Timeout: 15
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref LambdaSecurityGroup
+        SubnetIds:
+          - !Ref PrivateSubnet
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - s3:PutObject
+              Resource: !Sub '${AuditBucket.Arn}/*'
+      Tracing: Active
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-audit-logger'
+
+  # ============================================================================
+  # API GATEWAY
+  # ============================================================================
+
+  APIGateway:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: !Sub 'ask-iam-api-${Environment}'
+      StageName: !Ref Environment
+      TracingEnabled: true
+      MethodSettings:
+        - ResourcePath: '/*'
+          HttpMethod: '*'
+          LoggingLevel: INFO
+          DataTraceEnabled: true
+          MetricsEnabled: true
+      AccessLogSetting:
+        DestinationArn: !GetAtt APIGatewayLogGroup.Arn
+        Format: '$context.requestId $context.ip $context.requestTime $context.httpMethod $context.resourcePath $context.status $context.latency'
+      Auth:
+        ApiKeyRequired: true
+      Tags:
+        ask-iam-api: 'true'
+
+  APIKey:
+    Type: AWS::ApiGateway::ApiKey
+    Properties:
+      Name: !Sub 'ask-iam-api-key-${Environment}'
+      Enabled: true
+      StageKeys:
+        - RestApiId: !Ref APIGateway
+          StageName: !Ref Environment
+
+  APIUsagePlan:
+    Type: AWS::ApiGateway::UsagePlan
+    Properties:
+      UsagePlanName: !Sub 'ask-iam-usage-plan-${Environment}'
+      Description: Usage plan for AskIAM API
+      ApiStages:
+        - ApiId: !Ref APIGateway
+          Stage: !Ref Environment
+      Quota:
+        Limit: 1000000  # 1M requests per month
+        Period: MONTH
+      Throttle:
+        RateLimit: 1000  # Requests per second
+        BurstLimit: 2000
+
+  APIUsagePlanKey:
+    Type: AWS::ApiGateway::UsagePlanKey
+    Properties:
+      KeyId: !Ref APIKey
+      KeyType: API_KEY
+      UsagePlanId: !Ref APIUsagePlan
+
+  APIGatewayLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/apigateway/ask-iam-${Environment}'
+      RetentionInDays: 7
+
+  # ============================================================================
+  # AMAZON LEX BOT
+  # ============================================================================
+
+  LexRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lexv2.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: LambdaInvoke
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !GetAtt RequestOrchestratorFunction.Arn
+
+  LexBot:
+    Type: AWS::Lex::Bot
+    Properties:
+      Name: !Sub 'ask-iam-bot-${Environment}'
+      Description: AskIAM access request chatbot
+      RoleArn: !GetAtt LexRole.Arn
+      DataPrivacy:
+        ChildDirected: false
+      IdleSessionTTLInSeconds: 900
+      BotLocales:
+        - LocaleId: en_US
+          Description: English US locale
+          NluIntentConfidenceThreshold: 0.40
+          VoiceSettings:
+            VoiceId: Joanna
+          SlotTypes:
+            - SlotTypeName: UserNameSlotType
+              Description: Slot for user names
+              SlotTypeValues:
+                - SampleValue:
+                    RawValue: john.doe
+                - SampleValue:
+                    RawValue: jane.smith
+            - SlotTypeName: ApplicationSlotType
+              Description: Slot for application names
+              SlotTypeValues:
+                - SampleValue:
+                    RawValue: Workday
+                - SampleValue:
+                    RawValue: Salesforce
+                - SampleValue:
+                    RawValue: AzureAD
+            - SlotTypeName: RoleSlotType
+              Description: Slot for role names
+              SlotTypeValues:
+                - SampleValue:
+                    RawValue: HR Analyst
+                - SampleValue:
+                    RawValue: Payroll Admin
+                - SampleValue:
+                    RawValue: IT Admin
+          Intents:
+            - IntentName: AccessRequestIntent
+              Description: User requests access to a role
+              SampleUtterances:
+                - Utterance:
+                    UtteranceText: I need access to {RoleName} in {ApplicationName}
+                - Utterance:
+                    UtteranceText: Grant me {RoleName} role in {ApplicationName}
+                - Utterance:
+                    UtteranceText: Can I get {RoleName} for {ApplicationName}
+              SlotPriorities:
+                - Priority: 1
+                  SlotName: RoleName
+                - Priority: 2
+                  SlotName: ApplicationName
+              IntentConfirmationSetting:
+                PromptSpecification:
+                  MessageGroupsList:
+                    - Message:
+                        PlainTextMessage:
+                          Value: !Sub 'Should I process your access request for {RoleName} in {ApplicationName}?'
+                  MaxRetries: 2
+                DeclinationResponse:
+                  MessageGroupsList:
+                    - Message:
+                        PlainTextMessage:
+                          Value: Request cancelled.
+              FulfillmentCodeHook:
+                Enabled: true
+      TestBotAliasTags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-lex-bot'
+
+  # ============================================================================
+  # S3 BUCKET FOR AUDIT ARCHIVES
+  # ============================================================================
+
+  AuditBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'ask-iam-audit-${AWS::AccountId}-${AWS::Region}'
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: TransitionToGlacier
+            Status: Enabled
+            Transitions:
+              - TransitionInDays: 90
+                StorageClass: GLACIER
+          - Id: DeleteAfter2Years
+            Status: Enabled
+            ExpirationInDays: 730
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-audit-bucket'
+
+  # ============================================================================
+  # CLOUDWATCH LOG GROUPS
+  # ============================================================================
+
+  RequestOrchestratorLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/ask-iam/request-orchestrator-${Environment}'
+      RetentionInDays: 7
+
+  EntityExtractorLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/ask-iam/entity-extractor-${Environment}'
+      RetentionInDays: 7
+
+  RAGValidatorLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/ask-iam/rag-validator-${Environment}'
+      RetentionInDays: 7
+
+  MCPValidatorLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/ask-iam/mcp-validator-${Environment}'
+      RetentionInDays: 7
+
+  AuditLoggerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/ask-iam/audit-logger-${Environment}'
+      RetentionInDays: 7
+
+  # ============================================================================
+  # CLOUDWATCH ALARMS
+  # ============================================================================
+
+  RequestOrchestratorErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'ask-iam-request-orchestrator-errors-${Environment}'
+      AlarmDescription: Alert when RequestOrchestrator errors exceed 1%
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 100
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref RequestOrchestratorFunction
+      AlarmActions:
+        - !Ref SNSAlertTopic
+
+  APILatencyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'ask-iam-api-high-latency-${Environment}'
+      AlarmDescription: Alert when API latency exceeds 5 seconds
+      MetricName: Latency
+      Namespace: AWS/ApiGateway
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 5000
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: ApiName
+          Value: !Sub 'ask-iam-api-${Environment}'
+      AlarmActions:
+        - !Ref SNSAlertTopic
+
+  RDSCPUAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'ask-iam-rds-high-cpu-${Environment}'
+      AlarmDescription: Alert when RDS CPU exceeds 80%
+      MetricName: CPUUtilization
+      Namespace: AWS/RDS
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 80
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: DBClusterIdentifier
+          Value: !Ref RDSCluster
+      AlarmActions:
+        - !Ref SNSAlertTopic
+
+  SNSAlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub 'ask-iam-alerts-${Environment}'
+      DisplayName: AskIAM System Alerts
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-alerts'
+
+  # ============================================================================
+  # OUTPUTS
+  # ============================================================================
+
+Outputs:
+  APIEndpoint:
+    Description: API Gateway endpoint URL
+    Value: !Sub 'https://${APIGateway}.execute-api.${AWS::Region}.amazonaws.com/${Environment}'
+    Export:
+      Name: !Sub '${AWS::StackName}-api-endpoint'
+
+  APIKeyId:
+    Description: API Key ID for authentication
+    Value: !Ref APIKey
+    Export:
+      Name: !Sub '${AWS::StackName}-api-key-id'
+
+  RDSEndpoint:
+    Description: RDS Aurora cluster endpoint
+    Value: !GetAtt RDSCluster.Endpoint.Address
+    Export:
+      Name: !Sub '${AWS::StackName}-rds-endpoint'
+
+  OpenSearchEndpoint:
+    Description: OpenSearch Serverless collection endpoint
+    Value: !GetAtt OpenSearchCollection.CollectionEndpoint
+    Export:
+      Name: !Sub '${AWS::StackName}-opensearch-endpoint'
+
+  LexBotId:
+    Description: Amazon Lex bot ID
+    Value: !Ref LexBot
+    Export:
+      Name: !Sub '${AWS::StackName}-lex-bot-id'
+
+  RequestOrchestratorFunctionArn:
+    Description: RequestOrchestrator Lambda function ARN
+    Value: !GetAtt RequestOrchestratorFunction.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-request-orchestrator-arn'
+
+  AuditBucketName:
+    Description: S3 bucket for audit logs
+    Value: !Ref AuditBucket
+    Export:
+      Name: !Sub '${AWS::StackName}-audit-bucket'
+
+  SNSAlertTopicArn:
+    Description: SNS topic for alerts
+    Value: !Ref SNSAlertTopic
+    Export:
+      Name: !Sub '${AWS::StackName}-sns-alerts-arn'

@@ -1,6 +1,7 @@
 """
 LangGraph pipeline for IAM Access Validation.
 Integrates MCP (Model Context Protocol) and RAG (Retrieval Augmented Generation) as nodes.
+Full Langfuse tracing support for observability.
 """
 
 from typing_extensions import TypedDict
@@ -9,14 +10,18 @@ from langgraph.graph import StateGraph, START, END
 from core.types import IAMState
 from core.model_factory import create_llm
 from core.config_loader import load_config
+from core.telemetry import get_telemetry_client, get_langchain_callbacks
 from mcp.extract import extract_request
 from mcp.validators import run_validations
 from rag.rag_engine import validate_with_rag
+import logging
 
+logger = logging.getLogger(__name__)
 
 # Initialize components
 llm = create_llm()
 config = load_config()
+telemetry = get_telemetry_client()
 
 
 # Node 1: Initialize Request
@@ -178,12 +183,13 @@ def build_graph():
 pipeline = build_graph()
 
 
-def invoke_pipeline(request: str) -> str:
+def invoke_pipeline(request: str, session_id: Optional[str] = None) -> str:
     """
-    Invoke the LangGraph pipeline for IAM access validation.
+    Invoke the LangGraph pipeline for IAM access validation with full tracing.
     
     Args:
         request: The user's access request text
+        session_id: Optional session ID for multi-turn conversations
         
     Returns:
         The validation result as a string
@@ -200,10 +206,48 @@ def invoke_pipeline(request: str) -> str:
         "is_valid": None,
         "error": None,
         "final_response": None,
-        "processing_steps": []
+        "processing_steps": [        git add -A]
     }
     
-    # Execute the pipeline
-    result_state = pipeline.invoke(initial_state)
+    # Create root trace for entire request
+    trace_input = {
+        "request": request,
+        "session_id": session_id
+    }
+    trace_metadata = {
+        "environment": config.get("langfuse", {}).get("environment", "development"),
+        "version": config.get("langfuse", {}).get("version", "1.0.0"),
+        "component": "iam-validation-pipeline"
+    }
+    
+    with telemetry.trace(
+        name="iam-access-validation",
+        input=trace_input,
+        metadata=trace_metadata
+    ) as root_trace:
+        # Get telemetry callbacks for LangChain
+        telemetry_config = get_langchain_callbacks()
+        
+        # Execute the pipeline with telemetry
+        result_state = pipeline.invoke(initial_state, config=telemetry_config)
+        
+        # Update root trace with results
+        if root_trace and hasattr(root_trace, 'update'):
+            root_trace.update(
+                output={
+                    "final_response": result_state.get("final_response"),
+                    "is_valid": result_state.get("is_valid"),
+                    "processing_steps": result_state.get("processing_steps"),
+                    "errors": result_state.get("mcp_errors", [])
+                },
+                metadata={
+                    "processing_steps": result_state.get("processing_steps", []),
+                    "is_valid": result_state.get("is_valid"),
+                    "validation_type": "rag_then_mcp" if result_state.get("rag_validation") else "mcp_only"
+                }
+            )
+    
+    # Flush any pending events
+    telemetry.flush()
     
     return result_state.get("final_response", "Error: No response generated")
