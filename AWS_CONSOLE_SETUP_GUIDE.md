@@ -4,19 +4,660 @@
 ---
 
 ## Table of Contents
-1. [Prerequisites & Account Setup](#prerequisites--account-setup)
-2. [Part 1: Security Foundation (IAM Roles)](#part-1-security-foundation-iam-roles)
-3. [Part 2: Database Setup (Amazon RDS)](#part-2-database-setup-amazon-rds)
-4. [Part 3: Search & Analytics (OpenSearch Serverless)](#part-3-search--analytics-opensearch-serverless)
-5. [Part 4: Secrets Management](#part-4-secrets-management)
-6. [Part 5: Backend Logic (AWS Lambda)](#part-5-backend-logic-aws-lambda)
-7. [Part 6: Request Routing (API Gateway)](#part-6-request-routing-api-gateway)
-8. [Part 7: Conversational Interface (Amazon Lex)](#part-7-conversational-interface-amazon-lex)
-9. [Part 8: Monitoring & Logging](#part-8-monitoring--logging)
-10. [Part 9: Testing & Deployment](#part-9-testing--deployment)
-11. [Part 10: Troubleshooting & Optimization](#part-10-troubleshooting--optimization)
+1. [Team Setup: Two-Developer Architecture](#team-setup-two-developer-architecture)
+2. [Prerequisites & Account Setup](#prerequisites--account-setup)
+3. [Part 1: Security Foundation (IAM Roles)](#part-1-security-foundation-iam-roles)
+4. [Part 2: Database Setup (Amazon RDS)](#part-2-database-setup-amazon-rds)
+5. [Part 3: Search & Analytics (OpenSearch Serverless)](#part-3-search--analytics-opensearch-serverless)
+6. [Part 4: Secrets Management](#part-4-secrets-management)
+7. [Part 5: Backend Logic (AWS Lambda)](#part-5-backend-logic-aws-lambda)
+8. [Part 6: Request Routing (API Gateway)](#part-6-request-routing-api-gateway)
+9. [Part 7: Conversational Interface (Amazon Lex)](#part-7-conversational-interface-amazon-lex)
+10. [Part 8: Monitoring & Logging](#part-8-monitoring--logging)
+11. [Part 9: Testing & Deployment](#part-9-testing--deployment)
+12. [Part 10: Troubleshooting & Optimization](#part-10-troubleshooting--optimization)
 
 ---
+
+# Team Setup: Two-Developer Architecture
+
+## Architecture Overview
+
+This section provides step-by-step instructions for setting up AskIAM with a **single AWS account** and **two developer roles** with distinct responsibilities.
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│               SINGLE AWS ACCOUNT                             │
+│               (ask-iam-prod)                                 │
+├─────────────────────────────────────────────────────────────┤
+│                                                               │
+│  Developer 1 (Backend Services)    Developer 2 (Infrastructure) │
+│  ├─ IAM Role: Lambda-Developer     ├─ IAM Role: Infra-Developer
+│  ├─ Lambda Functions               ├─ IAM Roles/Policies
+│  ├─ RDS Database                   ├─ OpenSearch Setup
+│  ├─ Lex Bot                        ├─ VPC & Networking
+│  └─ API Gateway (partial)          ├─ CloudWatch & Monitoring
+│                                     └─ Secrets Manager
+│
+│  Shared: Parameter Store, Artifacts, CloudWatch Logs
+│
+└─────────────────────────────────────────────────────────────┘
+```
+
+## Why Single Account with Role Segregation?
+
+| Advantage | Benefit |
+|-----------|---------|
+| **Unified Billing** | Easy to track total project costs |
+| **Simplified Networking** | No VPC peering or cross-account setup |
+| **Faster Development** | Services in same account = lower latency |
+| **Shared Resources** | Parameter Store and Secrets Manager accessible to both |
+| **Easier Debugging** | Single CloudWatch log group for entire system |
+
+---
+
+## Step 0: Root Account Setup (Admin Only)
+
+### 0A: Create AWS Account
+
+1. **Go to AWS Sign-Up**
+   - Visit: https://aws.amazon.com/
+   - Click **"Create an AWS Account"**
+   - Email: professional email (use a shared team account if possible)
+   - Account Name: `ask-iam-prod`
+   - Password: strong password (15+ characters, mix of letters, numbers, symbols)
+
+2. **Add Payment Method**
+   - Credit/debit card required
+   - Verification charge: $1 (refunded in 1-2 days)
+
+3. **Choose Support Plan**
+   - Select: **"Basic Plan"** (free, sufficient for this project)
+
+4. **Complete Verification**
+   - Verify phone number and email
+   - Complete account setup
+
+5. **Sign In to Console**
+   - Go to: https://console.aws.amazon.com/
+   - Sign in with root account credentials
+
+### 0B: Enable MFA on Root Account
+
+**⚠️ CRITICAL: Protect your root account!**
+
+1. **Navigate to Security Credentials**
+   - Click your **account name** (top right)
+   - Select **"Security credentials"**
+
+2. **Set Up MFA**
+   - Scroll to **"Multi-factor authentication (MFA)"**
+   - Click **"Assign MFA device"**
+   - Choose **"Virtual MFA device"** (Google Authenticator or Authy)
+   - Follow prompts to scan QR code
+   - Save recovery codes in a secure location
+
+### 0C: Create Admin IAM User
+
+1. **Open IAM Console**
+   - Services → search **"IAM"** → click **IAM**
+
+2. **Create New User**
+   - Left sidebar → **"Users"** → **"Create user"**
+   - Username: `askiam-admin`
+   - Check: **"Provide user access to the AWS Management Console"**
+   - Console password: strong password
+   - **Uncheck**: "Users must create a new password on next sign-in"
+   - Click **"Next"**
+
+3. **Add Administrator Permissions**
+   - Click **"Attach policies directly"**
+   - Search: `AdministratorAccess`
+   - Check the policy
+   - Click **"Next"** → **"Create user"**
+
+4. **Save Login URL**
+   - Copy the console sign-in URL
+   - Format: `https://ACCOUNT-ID.signin.aws.amazon.com/console/`
+   - Share with admin only
+
+5. **Enable MFA on Admin User**
+   - In IAM console: Users → askiam-admin
+   - Click **"Security credentials"** tab
+   - Click **"Assign MFA device"**
+   - Complete MFA setup
+
+---
+
+## Step 1: Create Developer 1 Role (Backend Services)
+
+**Developer 1** is responsible for Lambda functions, RDS, Lex, and API Gateway.
+
+### 1A: Create Backend Developer IAM User
+
+1. **Open IAM Console**
+   - Services → **IAM**
+   - Left sidebar → **"Users"** → **"Create user"**
+
+2. **Create User**
+   - Username: `dev-1-backend`
+   - Check: **"Provide user access to the AWS Management Console"**
+   - Console password: provide strong password
+   - **Uncheck**: "Users must create a new password on next sign-in"
+   - Click **"Next"**
+
+3. **Save Credentials**
+   - Note the sign-in URL: `https://ACCOUNT-ID.signin.aws.amazon.com/console/`
+   - Username: `dev-1-backend`
+   - Password: the one you created
+   - Share with Developer 1 via secure channel (1Password, LastPass, etc.)
+
+### 1B: Create Backend Developer Role (Permission Policy)
+
+1. **Navigate to Roles**
+   - Left sidebar → **"Roles"** → **"Create role"**
+
+2. **Select Trusted Entity**
+   - Trusted entity type: **"AWS service"**
+   - Use case: Search and select **"Lambda"**
+   - Click **"Next"**
+
+3. **Add Permissions**
+   - Search and check each policy:
+     - `CloudWatchLogsFullAccess`
+     - `AmazonRDSFullAccess`
+     - `AmazonLexFullAccess`
+     - `AWSLambdaFullAccess`
+     - `AmazonAPIGatewayFullAccess`
+     - `SecretsManagerReadWrite`
+     - `AmazonSSMReadOnlyAccess`
+
+4. **Name the Role**
+   - Role name: `ask-iam-backend-developer`
+   - Description: `Role for backend engineer working on Lambda, RDS, Lex`
+   - Click **"Create role"**
+
+### 1C: Attach Role to Backend Developer User
+
+1. **Navigate to Users**
+   - Left sidebar → **"Users"** → **"dev-1-backend"**
+
+2. **Add Permissions**
+   - Click **"Add permissions"** → **"Attach policies directly"**
+   - Search: `AssumeRolePolicy` (custom) or use inline policy
+   - Create inline policy with this content:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": "sts:AssumeRole",
+      "Resource": "arn:aws:iam::ACCOUNT-ID:role/ask-iam-backend-developer"
+    }
+  ]
+}
+```
+
+3. **Click "Create policy"** → **"Attach"**
+
+### 1D: Developer 1 First Login
+
+1. **Sign In as Backend Developer**
+   - URL: `https://ACCOUNT-ID.signin.aws.amazon.com/console/`
+   - Username: `dev-1-backend`
+   - Password: provided by admin
+   - Set up MFA (recommended)
+   - Change password
+
+2. **Assume the Backend Developer Role**
+   - Click account name (top right) → **"Switch role"**
+   - Account: `ACCOUNT-ID` (12 digits)
+   - Role: `ask-iam-backend-developer`
+   - Display name: `Backend-Dev`
+   - Click **"Switch role"**
+
+3. **Verify Permissions**
+   - Should see: Lambda, RDS, Lex, API Gateway in Services
+   - Should NOT see: IAM management, VPC, Security Groups
+
+---
+
+## Step 2: Create Developer 2 Role (Infrastructure & DevOps)
+
+**Developer 2** is responsible for IAM roles, VPC, OpenSearch, CloudWatch, and Secrets Manager.
+
+### 2A: Create Infrastructure Developer IAM User
+
+1. **Open IAM Console** (as Admin)
+   - Services → **IAM**
+   - Left sidebar → **"Users"** → **"Create user"**
+
+2. **Create User**
+   - Username: `dev-2-infra`
+   - Check: **"Provide user access to the AWS Management Console"**
+   - Console password: provide strong password
+   - Click **"Next"**
+
+3. **Save Credentials**
+   - Sign-in URL: `https://ACCOUNT-ID.signin.aws.amazon.com/console/`
+   - Username: `dev-2-infra`
+   - Password: the one you created
+   - Share with Developer 2 via secure channel
+
+### 2B: Create Infrastructure Developer Role (Permission Policy)
+
+1. **Navigate to Roles**
+   - Left sidebar → **"Roles"** → **"Create role"**
+
+2. **Select Trusted Entity**
+   - Trusted entity type: **"AWS account"**
+   - Account ID: `ACCOUNT-ID` (your AWS account ID)
+   - Click **"Next"**
+
+3. **Add Permissions**
+   - Click **"Attach policies directly"**
+   - Search and check:
+     - `AmazonOpenSearchServiceFullAccess`
+     - `CloudWatchFullAccess`
+     - `SecretsManagerReadWrite`
+     - `AmazonVPCFullAccess`
+     - `EC2FullAccess` (for security groups)
+     - `AWSCloudTrailFullAccess`
+     - `CloudFormationFullAccess`
+
+4. **Add IAM-Specific Permissions**
+   - Continue searching and check:
+     - `IAMUserChangePassword` (for managing IAM users)
+   - We'll add a custom policy for IAM role creation
+
+5. **Name the Role**
+   - Role name: `ask-iam-infra-developer`
+   - Description: `Role for infrastructure engineer: IAM, VPC, OpenSearch, CloudWatch`
+   - Click **"Create role"**
+
+### 2C: Add Custom IAM Policy for Role Creation
+
+1. **Navigate to the Role**
+   - Left sidebar → **"Roles"** → search **"ask-iam-infra-developer"**
+   - Click on the role
+
+2. **Add Inline Policy**
+   - Click **"Add inline policy"** (at bottom)
+   - Select **"JSON"** tab
+   - Paste this policy:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "IAMRoleCreationAndManagement",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreateRole",
+        "iam:PutRolePolicy",
+        "iam:AttachRolePolicy",
+        "iam:UpdateRole",
+        "iam:GetRole",
+        "iam:ListRolePolicies",
+        "iam:ListAttachedRolePolicies",
+        "iam:PassRole",
+        "iam:DeleteRolePolicy",
+        "iam:DetachRolePolicy"
+      ],
+      "Resource": "arn:aws:iam::ACCOUNT-ID:role/ask-iam-*"
+    },
+    {
+      "Sid": "SecurityGroupManagement",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:CreateSecurityGroup",
+        "ec2:AuthorizeSecurityGroupIngress",
+        "ec2:AuthorizeSecurityGroupEgress",
+        "ec2:RevokeSecurityGroupIngress",
+        "ec2:RevokeSecurityGroupEgress",
+        "ec2:DeleteSecurityGroup",
+        "ec2:DescribeSecurityGroups",
+        "ec2:DescribeSecurityGroupRules",
+        "ec2:ModifySecurityGroupRules"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "ParameterStoreFullAccess",
+      "Effect": "Allow",
+      "Action": [
+        "ssm:PutParameter",
+        "ssm:GetParameter",
+        "ssm:GetParameters",
+        "ssm:DescribeParameters",
+        "ssm:DeleteParameter"
+      ],
+      "Resource": "arn:aws:ssm:*:ACCOUNT-ID:parameter/ask-iam/*"
+    }
+  ]
+}
+```
+
+   - Replace `ACCOUNT-ID` with your 12-digit AWS account ID
+   - Click **"Create policy"**
+
+### 2D: Attach Role to Infrastructure Developer User
+
+1. **Navigate to Users**
+   - Left sidebar → **"Users"** → **"dev-2-infra"**
+
+2. **Add Permissions**
+   - Click **"Add permissions"** → **"Attach policies directly"**
+   - Search: `AssumeRolePolicy` or create inline policy
+
+3. **Create Inline Policy**
+   - Click **"Add inline policy"**
+   - Select **"JSON"**
+   - Paste:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": "sts:AssumeRole",
+      "Resource": "arn:aws:iam::ACCOUNT-ID:role/ask-iam-infra-developer"
+    }
+  ]
+}
+```
+
+   - Click **"Create policy"**
+
+### 2E: Developer 2 First Login
+
+1. **Sign In as Infrastructure Developer**
+   - URL: `https://ACCOUNT-ID.signin.aws.amazon.com/console/`
+   - Username: `dev-2-infra`
+   - Password: provided by admin
+   - Set up MFA (recommended)
+   - Change password
+
+2. **Assume the Infrastructure Developer Role**
+   - Click account name (top right) → **"Switch role"**
+   - Account: `ACCOUNT-ID`
+   - Role: `ask-iam-infra-developer`
+   - Display name: `Infra-Dev`
+   - Click **"Switch role"**
+
+3. **Verify Permissions**
+   - Should see: OpenSearch, CloudWatch, VPC, EC2, IAM (limited), Secrets Manager
+   - Should NOT see: Lambda, RDS, Lex directly (only for creation)
+
+---
+
+## Step 3: Developer 1 Setup - Services They'll Deploy
+
+**Developer 1** will deploy the following services:
+
+### Services Checklist for Developer 1:
+
+```
+Development Timeline:
+├─ Week 1-2: Lambda Functions
+│  ├─ ask-iam-orchestrator (main entry point)
+│  ├─ ask-iam-entity-extractor
+│  ├─ ask-iam-rag-validator
+│  ├─ ask-iam-mcp-validator
+│  └─ ask-iam-audit-logger
+│
+├─ Week 2-3: Database
+│  ├─ Create RDS PostgreSQL instance
+│  ├─ Load sample IAM data (iam_sample_data.sql)
+│  └─ Create database connections in Lambda env vars
+│
+├─ Week 3: Lex Bot
+│  ├─ Create AskIAMBot
+│  ├─ Configure intents (CheckAccess, RequestAccess, etc.)
+│  └─ Connect to orchestrator Lambda
+│
+└─ Week 4: API Gateway
+   ├─ Create /chat endpoint
+   ├─ Connect to orchestrator Lambda
+   └─ Enable CORS
+```
+
+### 3A: Developer 1 Action Items
+
+Before starting, ensure:
+
+1. ✅ You have received sign-in credentials from admin
+2. ✅ You have signed in and switched to `ask-iam-backend-developer` role
+3. ✅ You can see Lambda, RDS, Lex in the Services menu
+4. ✅ You have MFA enabled
+
+**Proceed to**: [Part 5: Backend Logic (AWS Lambda)](#part-5-backend-logic-aws-lambda)
+
+---
+
+## Step 4: Developer 2 Setup - Services They'll Deploy
+
+**Developer 2** will deploy the following services:
+
+### Services Checklist for Developer 2:
+
+```
+Development Timeline:
+├─ Week 1: Foundation
+│  ├─ Create VPC (if needed)
+│  ├─ Create security groups for RDS
+│  ├─ Create security groups for OpenSearch
+│  └─ Create security groups for Lambda
+│
+├─ Week 1-2: Secrets & Configuration
+│  ├─ Create RDS password secret in Secrets Manager
+│  ├─ Create API keys secret (if needed)
+│  ├─ Create /ask-iam/prod/rds/endpoint parameter
+│  ├─ Create /ask-iam/prod/opensearch/endpoint parameter
+│  └─ Create /ask-iam/prod/ollama/endpoint parameter
+│
+├─ Week 2-3: OpenSearch Serverless
+│  ├─ Create ask-iam-collection
+│  ├─ Create vector search indexes
+│  ├─ Configure access policies
+│  └─ Test connectivity
+│
+├─ Week 3: Monitoring
+│  ├─ Create CloudWatch log groups
+│  ├─ Create CloudWatch dashboards
+│  ├─ Create CloudWatch alarms
+│  ├─ Set up SNS topic for alerts
+│  └─ Enable CloudTrail logging
+│
+└─ Week 4: Integration Support
+   ├─ Troubleshoot cross-service connectivity
+   ├─ Validate security group rules
+   └─ Monitor system health
+```
+
+### 4A: Developer 2 Action Items
+
+Before starting, ensure:
+
+1. ✅ You have received sign-in credentials from admin
+2. ✅ You have signed in and switched to `ask-iam-infra-developer` role
+3. ✅ You can see OpenSearch, CloudWatch, VPC, IAM in the Services menu
+4. ✅ You have MFA enabled
+
+**Proceed to**: [Part 2: Database Setup (Amazon RDS)](#part-2-database-setup-amazon-rds)
+
+---
+
+## Step 5: Collaboration & Handoff
+
+### Developer 1 → Developer 2 Handoffs
+
+**Milestone 1: Lambda Functions Ready**
+- Dev-1 commits code to Git
+- Dev-1 documents function names and environment variable requirements
+- Dev-1 provides Lambda execution role ARN
+- Dev-2 updates Parameter Store with endpoints
+
+**Milestone 2: RDS Setup Complete**
+- Dev-2 provides RDS endpoint and port
+- Dev-1 stores in Secrets Manager
+- Dev-1 tests Lambda → RDS connection
+
+**Milestone 3: OpenSearch Ready**
+- Dev-2 provides OpenSearch collection endpoint
+- Dev-1 stores in Parameter Store
+- Dev-1 tests RAG functionality
+
+**Milestone 4: CloudWatch Dashboards**
+- Dev-2 creates monitoring dashboards
+- Dev-1 verifies logs are appearing
+- Both monitor for errors during testing
+
+### Daily Sync Template
+
+```markdown
+## Daily Standup (Async Format)
+
+### Developer 1 (Backend)
+- **Yesterday**: 
+  - Deployed ask-iam-orchestrator Lambda v1.2.0
+  - Testing with mock RDS data
+- **Today**:
+  - Create ask-iam-rag-validator Lambda
+  - Test with ChromaDB
+- **Blockers**:
+  - Waiting for RDS endpoint from Dev-2
+
+### Developer 2 (Infra)
+- **Yesterday**:
+  - Created RDS PostgreSQL instance
+  - Created security groups
+- **Today**:
+  - Create RDS secret in Secrets Manager
+  - Store RDS endpoint in Parameter Store
+- **Blockers**: None
+
+### Shared Actions
+- [ ] Dev-2 provides RDS endpoint by EOD
+- [ ] Dev-1 validates Lambda can connect to RDS
+- [ ] Both review and merge the latest Git changes
+```
+
+---
+
+## Step 6: Git Repository Setup (Recommended)
+
+### Repository Structure
+
+```
+AskIAM-Assistant/
+├── infrastructure/                    (Dev-2 owns)
+│   ├── iam-roles/
+│   │   ├── lambda-execution-role.json
+│   │   ├── backend-developer-policy.json
+│   │   └── infra-developer-policy.json
+│   ├── security-groups/
+│   │   ├── rds-sg.json
+│   │   ├── opensearch-sg.json
+│   │   └── lambda-sg.json
+│   ├── opensearch/
+│   │   ├── collection-config.yaml
+│   │   └── vector-index-schema.json
+│   ├── cloudwatch/
+│   │   ├── log-groups.yaml
+│   │   ├── dashboards.json
+│   │   └── alarms.json
+│   └── README.md
+│
+├── backend/                           (Dev-1 owns)
+│   ├── orchestrator/
+│   │   ├── lambda_function.py
+│   │   ├── requirements.txt
+│   │   └── tests/
+│   ├── entity-extractor/
+│   ├── rag-validator/
+│   ├── mcp-validator/
+│   ├── audit-logger/
+│   └── README.md
+│
+├── docs/
+│   ├── ARCHITECTURE.md
+│   ├── TEAM_SETUP.md
+│   ├── DEPLOYMENT.md
+│   └── TROUBLESHOOTING.md
+│
+├── .gitignore
+│   (exclude: *.key, *.pem, .env, secrets/)
+│
+└── README.md
+```
+
+### Git Workflow
+
+```bash
+# Dev-1: Work on backend
+git checkout -b feature/lambda-orchestrator
+# Make changes...
+git commit -m "feat: implement orchestrator Lambda function"
+git push origin feature/lambda-orchestrator
+# Create Pull Request
+
+# Dev-2: Review and merge (after testing)
+git checkout main
+git pull origin
+# Deploy changes
+
+# Dev-2: Work on infrastructure
+git checkout -b feature/opensearch-setup
+# Make changes...
+git commit -m "feat: configure OpenSearch serverless collection"
+git push origin feature/opensearch-setup
+# Create Pull Request
+
+# Dev-1: Review and merge
+git checkout main
+git pull origin
+# Configure Lambda to use new OpenSearch endpoint
+```
+
+---
+
+## Step 7: Communication & Troubleshooting
+
+### When Things Go Wrong
+
+**Scenario 1: Lambda Cannot Connect to RDS**
+- Dev-1: Check CloudWatch logs for connection error
+- Dev-1: Ask Dev-2: "What's the RDS security group?"
+- Dev-2: Check if Lambda security group is authorized in RDS security group
+- Dev-2: Add inbound rule: Source = Lambda security group, Port = 5432
+
+**Scenario 2: Dev-1 Cannot Assume Backend Developer Role**
+- Admin: Check if dev-1-backend user has the AssumeRole policy
+- Admin: Verify the policy points to the correct role ARN
+
+**Scenario 3: OpenSearch Search Returns Empty Results**
+- Dev-2: Check OpenSearch collection status
+- Dev-1: Verify data was ingested (check ingest logs)
+- Dev-2: Check network connectivity between Lambda and OpenSearch
+
+### Communication Channels
+
+| Issue Type | Owner | Channel |
+|-----------|-------|---------|
+| Lambda/RDS connection | Dev-1 + Dev-2 | Slack #ask-iam-backend |
+| Security group rules | Dev-2 | Slack #ask-iam-infra |
+| Parameter Store values | Dev-2 (update) + Dev-1 (consume) | Email + Parameter Store |
+| Architecture decisions | Both | Weekly sync meeting |
+| Git conflicts | Both | Pull request discussion |
+
+---
+
+
 
 # Prerequisites & Account Setup
 
@@ -28,8 +669,21 @@
 - **Time**: 2-3 hours to complete the entire setup
 - **Code Files**: The Lambda function code provided in this project
 - **Terminal Access**: Optional (for testing endpoints)
+- **Two Developers**: Or one person can take both roles (see Team Setup section above)
+
+## Quick Start Checklist
+
+- [ ] Admin has completed Step 0 (Root Account Setup)
+- [ ] Admin has created both developer IAM users (Step 1 & 2)
+- [ ] Dev-1 has signed in and switched to `ask-iam-backend-developer` role
+- [ ] Dev-2 has signed in and switched to `ask-iam-infra-developer` role
+- [ ] Both developers have MFA enabled
+- [ ] Git repository is set up with proper directory structure
+- [ ] Team communication channels established (Slack, Email, etc.)
 
 ## Step 0: Create or Access Your AWS Account
+
+**This step is done by the Admin (root account owner)**
 
 ### If You Don't Have an AWS Account:
 
