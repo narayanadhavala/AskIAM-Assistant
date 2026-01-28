@@ -31,10 +31,19 @@ def validate_with_rag(text: str, k=3, filter=None) -> str | None:
                 search_filter = {"$and": conditions}
 
     # Perform similarity search with optional filter
-    results = _vectordb.similarity_search(text, k=k, filter=search_filter) if search_filter else _vectordb.similarity_search(text, k=k)
-    
+    #results = _vectordb.similarity_search(text, k=k, filter=search_filter) if search_filter else _vectordb.similarity_search(text, k=k)
+    search_kwargs = {"k": k, "score_threshold": 0.6}
+    if search_filter:
+        search_kwargs["filter"] = search_filter
+    results = _vectordb.as_retriever(search_kwargs=search_kwargs).invoke(text)
+    print("Similarity_score_thershold results:" ,results)
+
     if not results:
-        return None
+        fallback_kwargs = {"k": k}
+        if search_filter:
+            fallback_kwargs["filter"] = search_filter
+        results = _vectordb.as_retriever(search_kwargs=fallback_kwargs).invoke(text)
+        print("similarity results:", results, flush=True)
 
     # Extract context from results
     context = "\n".join(d.page_content for d in results)

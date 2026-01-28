@@ -206,7 +206,7 @@ def invoke_pipeline(request: str, session_id: Optional[str] = None) -> str:
         "is_valid": None,
         "error": None,
         "final_response": None,
-        "processing_steps": [        git add -A]
+        "processing_steps": []
     }
     
     # Create root trace for entire request

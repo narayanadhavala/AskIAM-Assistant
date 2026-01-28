@@ -29,7 +29,9 @@ queries = [
 
 for q in queries:
     print(f"\nQuery: {q}")
-    results = vectordb.similarity_search(q, k=2)
+    # results = vectordb.similarity_search(q, k=2, filter={"$and": [{"AppName": "Workday"}, {"RoleName": "HR Analyst"}]})
+    results = vectordb.as_retriever(search_kwargs={"k": 2, "filter": {"$and": [{"AppName": "Workday"}, {"RoleName": "HR Analyst"}]}}).invoke(q)
+
     for i in range(len(results)):
         if not results:
             print("No results found for query: {}".format(q))
