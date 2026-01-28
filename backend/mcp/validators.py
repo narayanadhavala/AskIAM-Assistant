@@ -6,6 +6,33 @@ from mcp.tools.sql_validator import validate_sql_tool
 from toolbox_langchain import ToolboxClient
 
 
+def _is_error_result(result: str) -> bool:
+    """
+    Check if a result string represents an error from the tool/database.
+    
+    Args:
+        result: The result string from a tool invocation
+        
+    Returns:
+        True if the result indicates an error, False otherwise
+    """
+    if not isinstance(result, str):
+        return False
+    
+    result_lower = result.lower()
+    error_indicators = [
+        "error",
+        "unable to execute",
+        "exception",
+        "invalid",
+        "failed",
+        "does not exist",
+        "sqlstate"
+    ]
+    
+    return any(indicator in result_lower for indicator in error_indicators)
+
+
 def run_validations(state: IAMState) -> IAMState:
     cfg = load_config()
     entities = cfg["entities"]
@@ -28,7 +55,13 @@ def run_validations(state: IAMState) -> IAMState:
 
             result = validate_entity_tool.invoke(tool_input)
 
-            if not result:
+            # Check for errors in result
+            if _is_error_result(result):
+                state["error"] = f"{entity['error']}: {result}"
+                return state
+            
+            # Check for empty/no results (entity not found)
+            if not result or result == "[]" or result == "null" or (isinstance(result, str) and result.strip() == ""):
                 state["error"] = entity["error"]
                 return state
 
@@ -75,8 +108,13 @@ def _validate_role_application_relationship(state: IAMState) -> IAMState:
             sql_tool = client.load_toolset("iam")[0]
             result = sql_tool.invoke({"sql": sql})
         
+        # Check for errors in result
+        if _is_error_result(result):
+            state["error"] = f"Database error during relationship validation: {result}"
+            return state
+        
         # Check if result is empty
-        if result and result != "[]" and result != "null" and result.strip() != "":
+        if result and result != "[]" and result != "null" and (isinstance(result, str) and result.strip() != ""):
             return state
         else:
             # Relationship invalid

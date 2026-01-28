@@ -13,6 +13,7 @@ def validate_with_rag(text: str, k=3, filter=None) -> str | None:
         _llm = create_llm()
 
     # Build search filter from metadata fields
+    # Build search filter from metadata fields
     search_filter = None
     if filter:
         # Build Chroma where filter from metadata dict
@@ -32,9 +33,20 @@ def validate_with_rag(text: str, k=3, filter=None) -> str | None:
 
     # Perform similarity search with optional filter
     results = _vectordb.similarity_search(text, k=k, filter=search_filter) if search_filter else _vectordb.similarity_search(text, k=k)
-    
     if not results:
         return None
+    # search_kwargs = {"k": k, "score_threshold": 0.6}
+    # if search_filter:
+    #     search_kwargs["filter"] = search_filter
+    # results = _vectordb.as_retriever(search_kwargs=search_kwargs).invoke(text)
+    # print("Similarity_score_thershold results:" ,results)
+
+    # if not results:
+    #     fallback_kwargs = {"k": k}
+    #     if search_filter:
+    #         fallback_kwargs["filter"] = search_filter
+    #     results = _vectordb.as_retriever(search_kwargs=fallback_kwargs).invoke(text)
+    #     print("similarity results:", results, flush=True)
 
     # Extract context from results
     context = "\n".join(d.page_content for d in results)

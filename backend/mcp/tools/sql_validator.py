@@ -1,5 +1,6 @@
 import re
 from langchain_core.tools import tool
+from core.tracer import get_tracer
 
 @tool
 def validate_sql_tool(sql: str, allowed_table: str) -> str:
@@ -23,8 +24,20 @@ def validate_sql_tool(sql: str, allowed_table: str) -> str:
         if re.search(rf"\b{word}\b", sql_clean):
             raise ValueError(f"Forbidden SQL keyword: {word}")
 
-    table_pattern = rf"\bfrom\s+{allowed_table.lower()}\b"
+    # Check table access: allow both quoted and unquoted identifiers
+    # Since sql_clean is lowercased, also lowercase the table name in pattern
+    # Pattern handles: FROM table_name or FROM "table_name"
+    # Word boundary \b only applies to unquoted identifiers (quoted ones end with ")
+    table_lower = allowed_table.lower()
+    table_pattern = rf'\bfrom\s+(?:"{table_lower}"|{table_lower}\b)'
     if not re.search(table_pattern, sql_clean):
         raise ValueError("Unauthorized table access")
 
-    return "ok"
+    result = "ok"
+    
+    # Trace tool invocation
+    tracer = get_tracer()
+    if tracer.is_enabled():
+        tracer.trace_tool("validate_sql_tool", {"sql": sql, "allowed_table": allowed_table}, result)
+    
+    return result

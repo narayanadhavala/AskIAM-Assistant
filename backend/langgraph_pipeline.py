@@ -9,6 +9,7 @@ from langgraph.graph import StateGraph, START, END
 from core.types import IAMState
 from core.model_factory import create_llm
 from core.config_loader import load_config
+from core.tracer import get_tracer
 from mcp.extract import extract_request
 from mcp.validators import run_validations
 from rag.rag_engine import validate_with_rag
@@ -27,6 +28,13 @@ def initialize_request(state: IAMState) -> IAMState:
     
     state["processing_steps"].append("initialize_request")
     
+    # Trace this node
+    tracer = get_tracer()
+    if tracer.is_enabled():
+        # Only trace relevant state parts to keep traces readable
+        trace_state = {k: v for k, v in state.items() if k in ["raw_request", "processing_steps", "error"]}
+        tracer.trace_node("initialize_request", {"raw_request": state.get("raw_request")}, trace_state)
+    
     return state
 
 
@@ -34,7 +42,24 @@ def initialize_request(state: IAMState) -> IAMState:
 def extract_entities(state: IAMState) -> IAMState:
     """Extract user, application, and role from the request using MCP."""
     state["processing_steps"].append("extract_entities")
+    input_state = {
+        "raw_request": state.get("raw_request"),
+        "user_name": state.get("user_name"),
+        "application_name": state.get("application_name"),
+        "role_name": state.get("role_name")
+    }
     state = extract_request(state)
+    
+    # Trace this node
+    tracer = get_tracer()
+    if tracer.is_enabled():
+        output_state = {
+            "user_name": state.get("user_name"),
+            "application_name": state.get("application_name"),
+            "role_name": state.get("role_name"),
+            "error": state.get("error")
+        }
+        tracer.trace_node("extract_entities", input_state, output_state)
     
     return state
 
@@ -44,18 +69,34 @@ def rag_validation(state: IAMState) -> IAMState:
     """Validate request using RAG against knowledge base."""
     state["processing_steps"].append("rag_validation")
     
+    input_state = {
+        "raw_request": state.get("raw_request"),
+        "application_name": state.get("application_name"),
+        "role_name": state.get("role_name"),
+        "user_name": state.get("user_name"),
+        "has_error": state.get("error") is not None
+    }
+    
     if state.get("error"):
         state["rag_validation"] = "SKIPPED"
         state["rag_documents"] = []
-        return state
+    else:
+        try:
+            rag_result = validate_with_rag(state["raw_request"], k=3, filter={"AppName": state.get("application_name"), "RoleName": state.get("role_name"), "UserName": state.get("user_name")})
+            state["rag_validation"] = rag_result if rag_result and rag_result.startswith("VALID") else None
+            state["rag_documents"] = []
+        except Exception as e:
+            state["rag_validation"] = f"RAG_ERROR: {str(e)}"
+            state["rag_documents"] = []
     
-    try:
-        rag_result = validate_with_rag(state["raw_request"], k=3, filter={"AppName": state.get("application_name"), "RoleName": state.get("role_name"), "UserName": state.get("user_name")})
-        state["rag_validation"] = rag_result if rag_result and rag_result.startswith("VALID") else None
-        state["rag_documents"] = []
-    except Exception as e:
-        state["rag_validation"] = f"RAG_ERROR: {str(e)}"
-        state["rag_documents"] = []
+    # Trace this node
+    tracer = get_tracer()
+    if tracer.is_enabled():
+        output_state = {
+            "rag_validation": state.get("rag_validation"),
+            "error": state.get("error")
+        }
+        tracer.trace_node("rag_validation", input_state, output_state)
     
     return state
 
@@ -70,23 +111,39 @@ def mcp_validation(state: IAMState) -> IAMState:
     """
     state["processing_steps"].append("mcp_validation")
     
+    input_state = {
+        "user_name": state.get("user_name"),
+        "application_name": state.get("application_name"),
+        "role_name": state.get("role_name"),
+        "has_error": state.get("error") is not None
+    }
+    
     if state.get("error"):
         state["mcp_validation"] = "FAILED"
         state["mcp_errors"] = [state.get("error", "Unknown error")]
-        return state
-    
-    try:
-        state = run_validations(state)
-        
-        if state.get("error"):
+    else:
+        try:
+            state = run_validations(state)
+            
+            if state.get("error"):
+                state["mcp_validation"] = "FAILED"
+                state["mcp_errors"] = [state["error"]]
+            else:
+                state["mcp_validation"] = "PASSED"
+                state["mcp_errors"] = []
+        except Exception as e:
             state["mcp_validation"] = "FAILED"
-            state["mcp_errors"] = [state["error"]]
-        else:
-            state["mcp_validation"] = "PASSED"
-            state["mcp_errors"] = []
-    except Exception as e:
-        state["mcp_validation"] = "FAILED"
-        state["mcp_errors"] = [str(e)]
+            state["mcp_errors"] = [str(e)]
+    
+    # Trace this node
+    tracer = get_tracer()
+    if tracer.is_enabled():
+        output_state = {
+            "mcp_validation": state.get("mcp_validation"),
+            "mcp_errors": state.get("mcp_errors", []),
+            "error": state.get("error")
+        }
+        tracer.trace_node("mcp_validation", input_state, output_state)
     
     return state
 
@@ -108,6 +165,15 @@ def finalize_response(state: IAMState) -> IAMState:
     """Prepare final response based on validation results."""
     state["processing_steps"].append("finalize")
     
+    input_state = {
+        "error": state.get("error"),
+        "rag_validation": state.get("rag_validation"),
+        "mcp_validation": state.get("mcp_validation"),
+        "user_name": state.get("user_name"),
+        "role_name": state.get("role_name"),
+        "application_name": state.get("application_name")
+    }
+    
     if state.get("error"):
         state["is_valid"] = False
         state["final_response"] = f"INVALID: {state['error']}"
@@ -125,6 +191,15 @@ def finalize_response(state: IAMState) -> IAMState:
         state["is_valid"] = False
         error_message = state["mcp_errors"][0] if state.get("mcp_errors") else "Validation failed"
         state["final_response"] = f"INVALID: {error_message}"
+    
+    # Trace this node
+    tracer = get_tracer()
+    if tracer.is_enabled():
+        output_state = {
+            "is_valid": state.get("is_valid"),
+            "final_response": state.get("final_response")
+        }
+        tracer.trace_node("finalize_response", input_state, output_state)
     
     return state
 

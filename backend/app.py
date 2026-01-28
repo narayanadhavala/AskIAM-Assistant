@@ -1,12 +1,25 @@
+import sys
 import gradio as gr
 from dotenv import load_dotenv
 from langgraph_pipeline import invoke_pipeline
 from core.config_loader import load_config
+from core.tracer import get_tracer
 
 # Load environment variables from .env file
 load_dotenv()
 
 cfg = load_config()
+
+# Check for --trace flag in command line arguments
+TRACING_ENABLED = "--trace" in sys.argv
+
+# Initialize tracer if enabled
+if TRACING_ENABLED:
+    tracer = get_tracer("trace.txt")
+    tracer.enable()
+    print("Tracing enabled. Traces will be written to trace.txt")
+    # Remove --trace from sys.argv so it doesn't interfere with Gradio
+    sys.argv.remove("--trace")
 
 def chat(message, history):
     """Process chat message using LangGraph pipeline."""
@@ -100,7 +113,10 @@ with gr.Blocks(
 
 def on_app_shutdown():
     """Clean up resources on app shutdown."""
-    pass
+    if TRACING_ENABLED:
+        tracer = get_tracer()
+        tracer.disable()
+        print(f"\nTracing completed. Check trace.txt for details.")
 
 
 # Register shutdown handler

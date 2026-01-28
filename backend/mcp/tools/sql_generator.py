@@ -5,6 +5,7 @@ from langchain_core.prompts import (
     ChatPromptTemplate,
 )
 from core.model_factory import create_llm
+from core.tracer import get_tracer
 
 @tool
 def generate_sql_tool(instruction: str) -> str:
@@ -16,7 +17,7 @@ def generate_sql_tool(instruction: str) -> str:
 
     system = SystemMessagePromptTemplate.from_template(
         """
-You generate MySQL SELECT statements.
+You generate PostgreSQL SELECT statements.
 
 SCHEMA:
 
@@ -28,11 +29,18 @@ STRICT RULES:
 - EXACTLY one SELECT statement
 - SELECT only the ID column
 - WHERE must use the correct Name column
+- ALWAYS quote table names with double quotes: "TableName"
+- ALWAYS quote column names with double quotes: "ColumnName"
 - NO SELECT *
 - NO JOIN, UNION, SUBQUERY
 - NO INSERT, UPDATE, DELETE
 - NO comments
 - Return ONLY raw SQL
+
+EXAMPLES:
+SELECT "UserID" FROM "Users" WHERE "UserName" = 'John.Doe' LIMIT 1
+SELECT "AppID" FROM "Applications" WHERE "AppName" = 'Workday' LIMIT 1
+SELECT "RoleID" FROM "Roles" WHERE "RoleName" = 'HR Analyst' LIMIT 1
 """
     )
 
@@ -43,4 +51,11 @@ STRICT RULES:
         prompt.format_messages(instruction=instruction)
     )
 
-    return result.content.strip()
+    sql_result = result.content.strip()
+    
+    # Trace tool invocation
+    tracer = get_tracer()
+    if tracer.is_enabled():
+        tracer.trace_tool("generate_sql_tool", {"instruction": instruction}, sql_result)
+    
+    return sql_result
