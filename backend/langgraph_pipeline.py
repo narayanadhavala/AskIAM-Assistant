@@ -10,7 +10,7 @@ from core.types import IAMState
 from core.model_factory import create_llm
 from core.config_loader import load_config
 from core.tracer import get_tracer
-from mcp.extract import extract_request
+from mcp.extract import extract_request_parallel_sync
 from mcp.validators import run_validations
 from rag.rag_engine import validate_with_rag
 
@@ -38,9 +38,14 @@ def initialize_request(state: IAMState) -> IAMState:
     return state
 
 
-# Node 2: Extract Entities (MCP)
+# Node 2: Extract Entities (MCP) - Parallel Execution
 def extract_entities(state: IAMState) -> IAMState:
-    """Extract user, application, and role from the request using MCP."""
+    """Extract user, application, and role using parallel asyncio execution.
+    
+    All three entities are extracted concurrently using asyncio.gather(),
+    significantly improving performance from sequential extraction.
+    Single Ollama instance handles all requests efficiently via request queuing.
+    """
     state["processing_steps"].append("extract_entities")
     input_state = {
         "raw_request": state.get("raw_request"),
@@ -48,7 +53,7 @@ def extract_entities(state: IAMState) -> IAMState:
         "application_name": state.get("application_name"),
         "role_name": state.get("role_name")
     }
-    state = extract_request(state)
+    state = extract_request_parallel_sync(state)
     
     # Trace this node
     tracer = get_tracer()

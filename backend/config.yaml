@@ -26,19 +26,19 @@ ui:
 
 entities:
   user:
-    table: Users
-    id_column: UserID
-    name_column: UserName
+    table: users
+    id_column: user_id
+    name_column: user_name
     error: Invalid user
 
   application:
-    table: Applications
-    id_column: AppID
-    name_column: AppName
+    table: applications
+    id_column: app_id
+    name_column: app_name
     error: Invalid app
 
   role:
-    table: Roles
-    id_column: RoleID
-    name_column: RoleName
+    table: roles
+    id_column: role_id
+    name_column: role_name
     error: Invalid role

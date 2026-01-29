@@ -82,7 +82,7 @@ def _validate_role_application_relationship(state: IAMState) -> IAMState:
     """
     Validate that the requested Role actually belongs to the requested Application.
     
-    This checks the foreign key relationship in the Roles table where AppName
+    This checks the foreign key relationship in the roles table where app_name
     must match the requested application_name.
     """
     cfg = load_config()
@@ -92,15 +92,15 @@ def _validate_role_application_relationship(state: IAMState) -> IAMState:
     
     # Build SQL to check if role belongs to the application
     sql_instruction = (
-        f"Generate a SQL query that selects RoleID from Roles "
-        f"where RoleName = '{role_name}' AND AppName = '{app_name}' LIMIT 1"
+        f"Generate a SQL query that selects role_id from roles "
+        f"where role_name = '{role_name}' and app_name = '{app_name}' LIMIT 1"
     )
     
     try:
         sql = generate_sql_tool.invoke({"instruction": sql_instruction})
         
         validate_sql_tool.invoke(
-            {"sql": sql, "allowed_table": "Roles"}
+            {"sql": sql, "allowed_table": "roles"}
         )
         
         cfg = load_config()

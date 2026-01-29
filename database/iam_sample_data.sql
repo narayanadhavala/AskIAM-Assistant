@@ -1,18 +1,18 @@
 -- IAM Database Schema
--- Compatible with: MySQL 8.0+, PostgreSQL 12+
--- CamelCase identifiers are quoted to preserve case in PostgreSQL
--- Usage: 
---   MySQL:      mysql -h localhost -u root -p iamdb < iam_sample_data.sql
---   PostgreSQL: docker exec -it postgres psql -U postgres -d iamdb -f /iam-sample-data.sql
+-- PostgreSQL and MySQL compatible
+-- Naming: lowercase + snake_case
+-- No quoted identifiers required
 
-
-CREATE TABLE IF NOT EXISTS "Applications" (
-    "AppID" VARCHAR(10) PRIMARY KEY,
-    "AppName" VARCHAR(50) NOT NULL UNIQUE,
-    "AppOwner" VARCHAR(100) NOT NULL
+-- =========================
+-- Applications
+-- =========================
+CREATE TABLE IF NOT EXISTS applications (
+    app_id VARCHAR(10) PRIMARY KEY,
+    app_name VARCHAR(50) NOT NULL UNIQUE,
+    app_owner VARCHAR(100) NOT NULL
 );
 
-INSERT INTO "Applications" ("AppID", "AppName", "AppOwner") VALUES
+INSERT INTO applications (app_id, app_name, app_owner) VALUES
 ('A01','Workday','James.Smith'),
 ('A02','Salesforce','Sarah.Jones'),
 ('A03','ServiceNow','Michael.Brown'),
@@ -25,16 +25,21 @@ INSERT INTO "Applications" ("AppID", "AppName", "AppOwner") VALUES
 ('A10','GitHub','Fiona.Gray'),
 ('A11','AzureAD','Hannah.Price');
 
--- Create roles table
-CREATE TABLE IF NOT EXISTS "Roles" (
-    "RoleID" VARCHAR(10) PRIMARY KEY,
-    "RoleName" VARCHAR(100) NOT NULL,
-    "AppName" VARCHAR(50) NOT NULL,
-    "Owner" VARCHAR(100) NOT NULL,
-    FOREIGN KEY ("AppName") REFERENCES "Applications"("AppName") ON DELETE CASCADE
+-- =========================
+-- Roles
+-- =========================
+CREATE TABLE IF NOT EXISTS roles (
+    role_id VARCHAR(10) PRIMARY KEY,
+    role_name VARCHAR(100) NOT NULL,
+    app_name VARCHAR(50) NOT NULL,
+    owner VARCHAR(100) NOT NULL,
+    CONSTRAINT fk_roles_app
+        FOREIGN KEY (app_name)
+        REFERENCES applications (app_name)
+        ON DELETE CASCADE
 );
 
-INSERT INTO "Roles" ("RoleID", "RoleName", "AppName", "Owner") VALUES
+INSERT INTO roles (role_id, role_name, app_name, owner) VALUES
 ('R01','HR Analyst','Workday','Aaron.Nichols'),
 ('R02','Payroll Admin','Workday','Bethany.Clark'),
 ('R03','Sales Manager','Salesforce','Sarah.Jones'),
@@ -47,15 +52,17 @@ INSERT INTO "Roles" ("RoleID", "RoleName", "AppName", "Owner") VALUES
 ('R10','Developer','GitHub','Julia.Rogers'),
 ('R11','IT Admin','AzureAD','Kevin.Liu');
 
--- Create users table
-CREATE TABLE IF NOT EXISTS "Users" (
-    "UserID" VARCHAR(10) PRIMARY KEY,
-    "UserName" VARCHAR(100) NOT NULL UNIQUE,
-    "Email" VARCHAR(150) NOT NULL UNIQUE,
-    "Manager" VARCHAR(100)
+-- =========================
+-- Users
+-- =========================
+CREATE TABLE IF NOT EXISTS users (
+    user_id VARCHAR(10) PRIMARY KEY,
+    user_name VARCHAR(100) NOT NULL UNIQUE,
+    email VARCHAR(150) NOT NULL UNIQUE,
+    manager VARCHAR(100)
 );
 
-INSERT INTO "Users" ("UserID", "UserName", "Email", "Manager") VALUES
+INSERT INTO users (user_id, user_name, email, manager) VALUES
 ('U01','Aaron.Nichols','Aaron.Nichols@test.com','James.Smith'),
 ('U02','Bethany.Clark','Bethany.Clark@test.com','James.Smith'),
 ('U03','Carlos.Mendez','Carlos.Mendez@test.com','Sarah.Jones'),
