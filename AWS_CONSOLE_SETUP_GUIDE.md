@@ -129,63 +129,268 @@ This section provides step-by-step instructions for setting up AskIAM with a **s
 
 ---
 
-## Step 1: Create Developer 1 Role (Backend Services)
+## Step 0D: CRITICAL - Save Your Account Information
 
-**Developer 1** is responsible for Lambda functions, RDS, Lex, and API Gateway.
+Create a secure document with this information:
+
+```
+AWS ACCOUNT SETUP CREDENTIALS
+==============================
+Account Name: ask-iam-prod
+Account ID: [12-digit number]
+Root Email: [your-email@company.com]
+Root Password: [STORE SECURELY IN PASSWORD MANAGER]
+Root MFA: [MFA serial/ARN]
+
+Admin User:
+Username: askiam-admin
+Password: [STORE SECURELY IN PASSWORD MANAGER]
+Console URL: https://[ACCOUNT-ID].signin.aws.amazon.com/console/
+MFA: [MFA serial/ARN]
+
+DO NOT SHARE ROOT CREDENTIALS - Only share admin credentials
+Store in: AWS Secrets Manager, 1Password, LastPass, or similar
+```
+
+**NEVER:**
+- Commit credentials to Git
+- Send credentials via email or Slack
+- Share root account access
+- Use root account for daily work
+
+**ALWAYS:**
+- Use MFA on all accounts
+- Use IAM users (not root)
+- Rotate passwords every 90 days
+- Store credentials in secure vault
+
+---
+
+---
+
+## Step 1: Create Developer 1 - Backend Services (ask-iam-dev)
+
+**Developer 1** is responsible for Lambda functions, RDS database connections, Lex, and API Gateway implementation.
 
 ### 1A: Create Backend Developer IAM User
 
-1. **Open IAM Console**
+1. **Open IAM Console** (as Admin)
    - Services → **IAM**
    - Left sidebar → **"Users"** → **"Create user"**
 
 2. **Create User**
-   - Username: `dev-1-backend`
+   - Username: `ask-iam-dev` (Backend Developer)
    - Check: **"Provide user access to the AWS Management Console"**
-   - Console password: provide strong password
+   - Console password: generate strong password (12+ characters, mix of types)
    - **Uncheck**: "Users must create a new password on next sign-in"
    - Click **"Next"**
 
-3. **Save Credentials**
-   - Note the sign-in URL: `https://ACCOUNT-ID.signin.aws.amazon.com/console/`
-   - Username: `dev-1-backend`
-   - Password: the one you created
-   - Share with Developer 1 via secure channel (1Password, LastPass, etc.)
+3. **Attach Policies Directly**
+   - Click **"Attach policies directly"**
+   - This user will assume a role, so we'll keep permissions minimal here
+   - We'll create the role in next step
 
-### 1B: Create Backend Developer Role (Permission Policy)
+4. **Review and Create**
+   - Click **"Create user"**
 
-1. **Navigate to Roles**
+5. **Save Credentials** (send via secure method - 1Password, LastPass, encrypted email)
+   - Username: `ask-iam-dev`
+   - Temporary Password: [generated password]
+   - Sign-in URL: `https://[ACCOUNT-ID].signin.aws.amazon.com/console/`
+   - **Tell Developer 1**: "Change password on first login"
+
+6. **Enable MFA** (Enforce this)
+   - Go to Users → `ask-iam-dev`
+   - Click **"Security credentials"** tab
+   - Click **"Assign MFA device"**
+   - Choose **"Virtual MFA device"**
+   - Developer scans QR code with Google Authenticator
+   - **MFA is MANDATORY for this user**
+
+### 1B: Create Backend Developer Role with Security Policies
+
+This role defines exactly what Lambda developers can and cannot do.
+
+1. **Create Role**
    - Left sidebar → **"Roles"** → **"Create role"**
 
-2. **Select Trusted Entity**
-   - Trusted entity type: **"AWS service"**
-   - Use case: Search and select **"Lambda"**
+2. **Trusted Entity**
+   - Trusted entity type: **"AWS account"**
+   - Account ID: Enter your 12-digit AWS account ID
    - Click **"Next"**
 
-3. **Add Permissions**
-   - Search and check each policy:
-     - `CloudWatchLogsFullAccess`
-     - `AmazonRDSFullAccess`
-     - `AmazonLexFullAccess`
-     - `AWSLambdaFullAccess`
-     - `AmazonAPIGatewayFullAccess`
-     - `SecretsManagerReadWrite`
-     - `AmazonSSMReadOnlyAccess`
+3. **Add AWS Managed Policies** (click "Attach policies directly")
+   - Search and attach:
+     - `AWSLambdaFullAccess` - Can manage Lambda functions
+     - `AWSLambdaVPCAccessExecutionRole` - Can put Lambda in VPC
+     - `AmazonRDSDataFullAccess` - Can execute queries on RDS
+     - `CloudWatchLogsFullAccess` - Can view and create logs
+     - `AmazonLexReadOnly` - Can view Lex bots
+     - `APIGatewayReadOnly` - Can view API Gateway
+     - `SecretsManagerReadWrite` - Can read secrets (database passwords)
+     - `AmazonSSMReadOnlyAccess` - Can read parameters from Parameter Store
+     - `AWSCloudTrailReadOnlyAccess` - Can view audit logs
 
-4. **Name the Role**
+4. **Add Custom Security Policy** (Very Important!)
+   - Click **"Add inline policy"** (at bottom after attaching policies)
+   - Choose **"JSON"** tab
+   - Replace the default with this restrictive policy:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "LambdaFunctionManagement",
+      "Effect": "Allow",
+      "Action": [
+        "lambda:CreateFunction",
+        "lambda:UpdateFunctionCode",
+        "lambda:UpdateFunctionConfiguration",
+        "lambda:DeleteFunction",
+        "lambda:GetFunction",
+        "lambda:ListFunctions",
+        "lambda:InvokeFunction",
+        "lambda:CreateEventSourceMapping",
+        "lambda:DeleteEventSourceMapping"
+      ],
+      "Resource": "arn:aws:lambda:*:*:function:ask-iam-*"
+    },
+    {
+      "Sid": "IAMPassRoleForLambda",
+      "Effect": "Allow",
+      "Action": [
+        "iam:PassRole"
+      ],
+      "Resource": "arn:aws:iam::*:role/ask-iam-lambda-execution-role",
+      "Condition": {
+        "StringEquals": {
+          "iam:PassedToService": "lambda.amazonaws.com"
+        }
+      }
+    },
+    {
+      "Sid": "RDSAccess",
+      "Effect": "Allow",
+      "Action": [
+        "rds:DescribeDBInstances",
+        "rds:DescribeDBClusters",
+        "rds:DescribeDBClusterSnapshots",
+        "rds-db:connect"
+      ],
+      "Resource": "arn:aws:rds:*:*:db:ask-iam-*"
+    },
+    {
+      "Sid": "LexBotAccess",
+      "Effect": "Allow",
+      "Action": [
+        "lex:RecognizeText",
+        "lex:PostText",
+        "lex:GetBot",
+        "lex:ListBots",
+        "lex:GetBotAlias"
+      ],
+      "Resource": "arn:aws:lex:*:*:bot-alias/AskIAMBot/*"
+    },
+    {
+      "Sid": "APIGatewayLimited",
+      "Effect": "Allow",
+      "Action": [
+        "apigateway:GET",
+        "apigateway:POST",
+        "apigateway:PUT",
+        "apigateway:PATCH"
+      ],
+      "Resource": [
+        "arn:aws:apigateway:*::/restapis/*/resources/*",
+        "arn:aws:apigateway:*::/restapis/*/methods/*"
+      ]
+    },
+    {
+      "Sid": "DenyIAMChanges",
+      "Effect": "Deny",
+      "Action": [
+        "iam:*",
+        "organizations:*"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "DenyVPCChanges",
+      "Effect": "Deny",
+      "Action": [
+        "ec2:CreateVpc",
+        "ec2:DeleteVpc",
+        "ec2:ModifyVpcAttribute",
+        "ec2:CreateSecurityGroup",
+        "ec2:DeleteSecurityGroup"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "DenyDatabaseChanges",
+      "Effect": "Deny",
+      "Action": [
+        "rds:CreateDBInstance",
+        "rds:DeleteDBInstance",
+        "rds:ModifyDBInstance",
+        "rds:RebootDBInstance"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "AllowReadOnlyMetrics",
+      "Effect": "Allow",
+      "Action": [
+        "cloudwatch:GetMetricStatistics",
+        "cloudwatch:ListMetrics",
+        "cloudwatch:DescribeAlarms"
+      ],
+      "Resource": "*"
+    }
+  ]
+}
+```
+
+5. **Name the Role**
    - Role name: `ask-iam-backend-developer`
-   - Description: `Role for backend engineer working on Lambda, RDS, Lex`
+   - Description: `Backend developer role - manages Lambda, RDS queries, Lex bots, API Gateway endpoints. Restricted from infrastructure changes.`
    - Click **"Create role"**
 
-### 1C: Attach Role to Backend Developer User
+### 1C: Create Inline Policy for Role Assumption
 
-1. **Navigate to Users**
-   - Left sidebar → **"Users"** → **"dev-1-backend"**
+1. **Still in IAM → Roles**
+   - Click the role: `ask-iam-backend-developer`
 
-2. **Add Permissions**
-   - Click **"Add permissions"** → **"Attach policies directly"**
-   - Search: `AssumeRolePolicy` (custom) or use inline policy
-   - Create inline policy with this content:
+2. **Check Trust Relationship**
+   - Click **"Trust relationships"** tab
+   - You should see your AWS account as trusted entity
+
+3. **Verify It Looks Like**:
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "AWS": "arn:aws:iam::ACCOUNT-ID:root"
+      },
+      "Action": "sts:AssumeRole"
+    }
+  ]
+}
+```
+
+### 1D: Grant User Permission to Assume Backend Developer Role
+
+1. **Go to Users**
+   - Left sidebar → **"Users"** → **"ask-iam-dev"**
+
+2. **Add Inline Policy**
+   - Click **"Add inline policy"** (at bottom right)
+   - Choose **"JSON"** tab
+   - Paste:
 
 ```json
 {
@@ -200,33 +405,113 @@ This section provides step-by-step instructions for setting up AskIAM with a **s
 }
 ```
 
-3. **Click "Create policy"** → **"Attach"**
+   - Replace `ACCOUNT-ID` with your 12-digit AWS account ID
+   - Click **"Create policy"**
 
-### 1D: Developer 1 First Login
+### 1E: Developer 1 First Login Checklist
 
-1. **Sign In as Backend Developer**
-   - URL: `https://ACCOUNT-ID.signin.aws.amazon.com/console/`
-   - Username: `dev-1-backend`
-   - Password: provided by admin
-   - Set up MFA (recommended)
-   - Change password
+**Send this checklist to Developer 1:**
 
-2. **Assume the Backend Developer Role**
-   - Click account name (top right) → **"Switch role"**
-   - Account: `ACCOUNT-ID` (12 digits)
-   - Role: `ask-iam-backend-developer`
-   - Display name: `Backend-Dev`
-   - Click **"Switch role"**
+```
+========================================
+DEVELOPER 1 (ask-iam-dev) - FIRST LOGIN
+========================================
 
-3. **Verify Permissions**
-   - Should see: Lambda, RDS, Lex, API Gateway in Services
-   - Should NOT see: IAM management, VPC, Security Groups
+Step 1: Initial Sign-In
+- URL: https://[ACCOUNT-ID].signin.aws.amazon.com/console/
+- Username: ask-iam-dev
+- Password: [temporary password provided by admin]
+
+Step 2: Change Your Password
+- Click Account Name (top right) → Security credentials
+- Change password to something only you know
+- Store in 1Password or secure password manager
+
+Step 3: Enable MFA
+- AWS Console → Services → IAM
+- Users → ask-iam-dev
+- Security credentials tab
+- Assign MFA device
+- Use Google Authenticator or Authy
+- Scan QR code
+- Save recovery codes safely
+
+Step 4: Assume Backend Developer Role
+- Click Account Name (top right) → Switch role
+- Account: [ACCOUNT-ID]
+- Role: ask-iam-backend-developer
+- Display name: Backend-Dev (optional)
+- Click Switch role
+
+Step 5: Verify Permissions
+After switching role, you should see:
+✓ Lambda console (create/update functions)
+✓ RDS console (view databases)
+✓ Lex console (view bots)
+✓ API Gateway console (view APIs)
+✓ CloudWatch (view logs)
+✗ IAM console (should not have access)
+✗ VPC console (should not have access)
+✗ Security groups (should not have access)
+
+Step 6: Set Up Local AWS CLI (Optional)
+aws configure --profile ask-iam-dev
+Enter: Access Key ID (we'll create next)
+Enter: Secret Access Key (we'll create next)
+Region: [your AWS region, e.g., us-east-1]
+
+Step 7: Proceed to Development
+- Clone GitHub repository
+- Start with Lambda functions
+- Follow Part 5: Backend Logic section
+```
+
+### 1F: Create Access Keys for CLI/API Access
+
+1. **Go to Users**
+   - IAM → Users → `ask-iam-dev`
+
+2. **Create Access Key**
+   - Click **"Security credentials"** tab
+   - Scroll to **"Access keys"** section
+   - Click **"Create access key"**
+   - Use case: **"Application running outside AWS"**
+   - Click **"Create access key"**
+
+3. **Save Keys Securely**
+   - You'll see: **Access Key ID** and **Secret Access Key**
+   - Click **"Download .csv file"** (safest option)
+   - Share only with Developer 1 via secure channel
+   - **NEVER commit to Git or email unencrypted**
+
+4. **Developer 1 Setup on Local Machine**
+
+```bash
+# On Developer 1's laptop
+aws configure --profile ask-iam-dev
+
+# Enter when prompted:
+# AWS Access Key ID: [from CSV file]
+# AWS Secret Access Key: [from CSV file]
+# Default region name: us-east-1 (or your region)
+# Default output format: json
+
+# Test connection
+aws sts get-caller-identity --profile ask-iam-dev
+
+# Should output something like:
+# {
+#     "UserId": "AIDAQ...",
+#     "Account": "123456789012",
+#     "Arn": "arn:aws:iam::123456789012:user/ask-iam-dev"
+# }
+```
 
 ---
 
-## Step 2: Create Developer 2 Role (Infrastructure & DevOps)
+## Step 2: Create Developer 2 - Infrastructure & DevOps (dev-2-infra)
 
-**Developer 2** is responsible for IAM roles, VPC, OpenSearch, CloudWatch, and Secrets Manager.
+**Developer 2** is responsible for VPC, security groups, RDS setup, OpenSearch, CloudWatch monitoring, and Secrets Manager.
 
 ### 2A: Create Infrastructure Developer IAM User
 
@@ -235,65 +520,66 @@ This section provides step-by-step instructions for setting up AskIAM with a **s
    - Left sidebar → **"Users"** → **"Create user"**
 
 2. **Create User**
-   - Username: `dev-2-infra`
+   - Username: `dev-2-infra` (Infrastructure Developer)
    - Check: **"Provide user access to the AWS Management Console"**
-   - Console password: provide strong password
+   - Console password: generate strong password (12+ characters, mix of types)
+   - **Uncheck**: "Users must create a new password on next sign-in"
    - Click **"Next"**
 
-3. **Save Credentials**
-   - Sign-in URL: `https://ACCOUNT-ID.signin.aws.amazon.com/console/`
+3. **Keep Policies Empty For Now**
+   - We'll attach role assumption instead
+   - Click **"Create user"**
+
+4. **Save Credentials** (send via secure method)
    - Username: `dev-2-infra`
-   - Password: the one you created
-   - Share with Developer 2 via secure channel
+   - Temporary Password: [generated password]
+   - Sign-in URL: `https://[ACCOUNT-ID].signin.aws.amazon.com/console/`
+   - **Tell Developer 2**: "Change password on first login"
 
-### 2B: Create Infrastructure Developer Role (Permission Policy)
+5. **Enable MFA** (Mandatory)
+   - Go to Users → `dev-2-infra`
+   - Click **"Security credentials"** tab
+   - Click **"Assign MFA device"**
+   - Developer scans QR code with Google Authenticator
+   - **MFA is REQUIRED**
 
-1. **Navigate to Roles**
+### 2B: Create Infrastructure Developer Role with Security Policies
+
+This role defines what infrastructure engineers can do.
+
+1. **Create Role**
    - Left sidebar → **"Roles"** → **"Create role"**
 
-2. **Select Trusted Entity**
+2. **Trusted Entity**
    - Trusted entity type: **"AWS account"**
-   - Account ID: `ACCOUNT-ID` (your AWS account ID)
+   - Account ID: Enter your 12-digit AWS account ID
    - Click **"Next"**
 
-3. **Add Permissions**
-   - Click **"Attach policies directly"**
-   - Search and check:
-     - `AmazonOpenSearchServiceFullAccess`
-     - `CloudWatchFullAccess`
-     - `SecretsManagerReadWrite`
-     - `AmazonVPCFullAccess`
-     - `EC2FullAccess` (for security groups)
-     - `AWSCloudTrailFullAccess`
-     - `CloudFormationFullAccess`
+3. **Add AWS Managed Policies** (click "Attach policies directly")
+   - Search and attach:
+     - `AmazonVPCFullAccess` - Can manage VPC, subnets, routes
+     - `AmazonEC2SecurityGroupFullAccess` - Can manage security groups
+     - `AmazonRDSFullAccess` - Can create and manage RDS instances
+     - `AmazonOpenSearchServiceFullAccess` - Can manage OpenSearch
+     - `CloudWatchFullAccess` - Can create dashboards and alarms
+     - `SecretsManagerReadWrite` - Can manage secrets
+     - `AmazonSSMFullAccess` - Can manage Parameter Store
+     - `CloudTrailFullAccess` - Can enable audit logging
+     - `CloudFormationFullAccess` - Can manage infrastructure as code
+     - `ElastiCacheFullAccess` - Can manage caching layers
+     - `AWSCloudTrailReadOnlyAccess` - Can view audit logs
 
-4. **Add IAM-Specific Permissions**
-   - Continue searching and check:
-     - `IAMUserChangePassword` (for managing IAM users)
-   - We'll add a custom policy for IAM role creation
-
-5. **Name the Role**
-   - Role name: `ask-iam-infra-developer`
-   - Description: `Role for infrastructure engineer: IAM, VPC, OpenSearch, CloudWatch`
-   - Click **"Create role"**
-
-### 2C: Add Custom IAM Policy for Role Creation
-
-1. **Navigate to the Role**
-   - Left sidebar → **"Roles"** → search **"ask-iam-infra-developer"**
-   - Click on the role
-
-2. **Add Inline Policy**
-   - Click **"Add inline policy"** (at bottom)
-   - Select **"JSON"** tab
-   - Paste this policy:
+4. **Add Custom Security Policy**
+   - Click **"Add inline policy"**
+   - Choose **"JSON"** tab
+   - Replace default with this policy:
 
 ```json
 {
   "Version": "2012-10-17",
   "Statement": [
     {
-      "Sid": "IAMRoleCreationAndManagement",
+      "Sid": "IAMRoleManagement",
       "Effect": "Allow",
       "Action": [
         "iam:CreateRole",
@@ -305,57 +591,180 @@ This section provides step-by-step instructions for setting up AskIAM with a **s
         "iam:ListAttachedRolePolicies",
         "iam:PassRole",
         "iam:DeleteRolePolicy",
-        "iam:DetachRolePolicy"
+        "iam:DetachRolePolicy",
+        "iam:GetPolicy",
+        "iam:GetPolicyVersion"
       ],
-      "Resource": "arn:aws:iam::ACCOUNT-ID:role/ask-iam-*"
+      "Resource": [
+        "arn:aws:iam::*:role/ask-iam-*",
+        "arn:aws:iam::*:policy/ask-iam-*"
+      ]
     },
     {
-      "Sid": "SecurityGroupManagement",
+      "Sid": "VPCFullManagement",
       "Effect": "Allow",
       "Action": [
-        "ec2:CreateSecurityGroup",
-        "ec2:AuthorizeSecurityGroupIngress",
-        "ec2:AuthorizeSecurityGroupEgress",
-        "ec2:RevokeSecurityGroupIngress",
-        "ec2:RevokeSecurityGroupEgress",
-        "ec2:DeleteSecurityGroup",
-        "ec2:DescribeSecurityGroups",
-        "ec2:DescribeSecurityGroupRules",
-        "ec2:ModifySecurityGroupRules"
+        "ec2:CreateVpc",
+        "ec2:DeleteVpc",
+        "ec2:DescribeVpcs",
+        "ec2:ModifyVpcAttribute",
+        "ec2:CreateSubnet",
+        "ec2:DeleteSubnet",
+        "ec2:DescribeSubnets",
+        "ec2:CreateRouteTable",
+        "ec2:DeleteRouteTable",
+        "ec2:DescribeRouteTables",
+        "ec2:CreateRoute",
+        "ec2:DeleteRoute",
+        "ec2:AssociateRouteTable",
+        "ec2:DisassociateRouteTable",
+        "ec2:AllocateAddress",
+        "ec2:ReleaseAddress",
+        "ec2:DescribeAddresses"
       ],
       "Resource": "*"
     },
     {
-      "Sid": "ParameterStoreFullAccess",
+      "Sid": "SecurityGroupFullManagement",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:CreateSecurityGroup",
+        "ec2:DeleteSecurityGroup",
+        "ec2:DescribeSecurityGroups",
+        "ec2:DescribeSecurityGroupRules",
+        "ec2:AuthorizeSecurityGroupIngress",
+        "ec2:AuthorizeSecurityGroupEgress",
+        "ec2:RevokeSecurityGroupIngress",
+        "ec2:RevokeSecurityGroupEgress",
+        "ec2:ModifySecurityGroupRules",
+        "ec2:UpdateSecurityGroupRuleDescriptionsIngress",
+        "ec2:UpdateSecurityGroupRuleDescriptionsEgress"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "RDSFullManagement",
+      "Effect": "Allow",
+      "Action": [
+        "rds:CreateDBInstance",
+        "rds:DeleteDBInstance",
+        "rds:ModifyDBInstance",
+        "rds:RebootDBInstance",
+        "rds:RestoreDBInstanceFromDBSnapshot",
+        "rds:CreateDBSnapshot",
+        "rds:DeleteDBSnapshot",
+        "rds:DescribeDBInstances",
+        "rds:DescribeDBClusters",
+        "rds:DescribeDBSnapshots",
+        "rds:CreateDBCluster",
+        "rds:DeleteDBCluster",
+        "rds:ModifyDBCluster",
+        "rds:CreateDBClusterSnapshot"
+      ],
+      "Resource": "arn:aws:rds:*:*:db:ask-iam-*"
+    },
+    {
+      "Sid": "OpenSearchManagement",
+      "Effect": "Allow",
+      "Action": [
+        "aoss:CreateCollection",
+        "aoss:DeleteCollection",
+        "aoss:DescribeCollection",
+        "aoss:ListCollections",
+        "aoss:UpdateCollection",
+        "aoss:TagResource",
+        "aoss:UntagResource",
+        "aoss:CreateSecurityPolicy",
+        "aoss:DeleteSecurityPolicy",
+        "aoss:GetSecurityPolicy",
+        "aoss:ListSecurityPolicies",
+        "aoss:CreateAccessPolicy",
+        "aoss:DeleteAccessPolicy",
+        "aoss:GetAccessPolicy",
+        "aoss:ListAccessPolicies",
+        "aoss:BatchGetCollection"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "CloudWatchFullManagement",
+      "Effect": "Allow",
+      "Action": [
+        "cloudwatch:*",
+        "logs:CreateLogGroup",
+        "logs:CreateLogStream",
+        "logs:DeleteLogGroup",
+        "logs:DeleteLogStream",
+        "logs:DescribeLogGroups",
+        "logs:DescribeLogStreams",
+        "logs:PutRetentionPolicy",
+        "logs:TagLogGroup",
+        "logs:UntagLogGroup"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "SecretsManagerManagement",
+      "Effect": "Allow",
+      "Action": [
+        "secretsmanager:CreateSecret",
+        "secretsmanager:UpdateSecret",
+        "secretsmanager:DeleteSecret",
+        "secretsmanager:DescribeSecret",
+        "secretsmanager:GetSecretValue",
+        "secretsmanager:ListSecrets",
+        "secretsmanager:RotateSecret",
+        "secretsmanager:TagResource",
+        "secretsmanager:UntagResource"
+      ],
+      "Resource": "arn:aws:secretsmanager:*:*:secret:ask-iam/*"
+    },
+    {
+      "Sid": "ParameterStoreManagement",
       "Effect": "Allow",
       "Action": [
         "ssm:PutParameter",
         "ssm:GetParameter",
         "ssm:GetParameters",
         "ssm:DescribeParameters",
-        "ssm:DeleteParameter"
+        "ssm:DeleteParameter",
+        "ssm:AddTagsToResource",
+        "ssm:RemoveTagsFromResource",
+        "ssm:ListTagsForResource"
       ],
-      "Resource": "arn:aws:ssm:*:ACCOUNT-ID:parameter/ask-iam/*"
+      "Resource": "arn:aws:ssm:*:*:parameter/ask-iam/*"
+    },
+    {
+      "Sid": "DenyUnauthorizedActions",
+      "Effect": "Deny",
+      "Action": [
+        "iam:DeleteUser",
+        "iam:DeleteRole",
+        "iam:DeleteAccessKey",
+        "iam:CreateAccessKey",
+        "iam:CreateUser",
+        "organizations:*",
+        "billing:*"
+      ],
+      "Resource": "*"
     }
   ]
 }
 ```
 
-   - Replace `ACCOUNT-ID` with your 12-digit AWS account ID
-   - Click **"Create policy"**
+5. **Name the Role**
+   - Role name: `ask-iam-infra-developer`
+   - Description: `Infrastructure developer role - manages VPC, RDS, OpenSearch, CloudWatch, Secrets Manager. Restricted from user management and billing.`
+   - Click **"Create role"**
 
-### 2D: Attach Role to Infrastructure Developer User
+### 2C: Grant User Permission to Assume Infrastructure Developer Role
 
-1. **Navigate to Users**
+1. **Go to Users**
    - Left sidebar → **"Users"** → **"dev-2-infra"**
 
-2. **Add Permissions**
-   - Click **"Add permissions"** → **"Attach policies directly"**
-   - Search: `AssumeRolePolicy` or create inline policy
-
-3. **Create Inline Policy**
+2. **Add Inline Policy**
    - Click **"Add inline policy"**
-   - Select **"JSON"**
+   - Choose **"JSON"** tab
    - Paste:
 
 ```json
@@ -371,31 +780,709 @@ This section provides step-by-step instructions for setting up AskIAM with a **s
 }
 ```
 
+   - Replace `ACCOUNT-ID` with your 12-digit AWS account ID
    - Click **"Create policy"**
 
-### 2E: Developer 2 First Login
+### 2D: Developer 2 First Login Checklist
 
-1. **Sign In as Infrastructure Developer**
-   - URL: `https://ACCOUNT-ID.signin.aws.amazon.com/console/`
-   - Username: `dev-2-infra`
-   - Password: provided by admin
-   - Set up MFA (recommended)
-   - Change password
+**Send this checklist to Developer 2:**
 
-2. **Assume the Infrastructure Developer Role**
-   - Click account name (top right) → **"Switch role"**
-   - Account: `ACCOUNT-ID`
-   - Role: `ask-iam-infra-developer`
-   - Display name: `Infra-Dev`
-   - Click **"Switch role"**
+```
+==========================================
+DEVELOPER 2 (dev-2-infra) - FIRST LOGIN
+==========================================
 
-3. **Verify Permissions**
-   - Should see: OpenSearch, CloudWatch, VPC, EC2, IAM (limited), Secrets Manager
-   - Should NOT see: Lambda, RDS, Lex directly (only for creation)
+Step 1: Initial Sign-In
+- URL: https://[ACCOUNT-ID].signin.aws.amazon.com/console/
+- Username: dev-2-infra
+- Password: [temporary password provided by admin]
+
+Step 2: Change Your Password
+- Click Account Name (top right) → Security credentials
+- Change password to something only you know
+- Store in 1Password or secure password manager
+
+Step 3: Enable MFA
+- AWS Console → Services → IAM
+- Users → dev-2-infra
+- Security credentials tab
+- Assign MFA device
+- Use Google Authenticator or Authy
+- Scan QR code
+- Save recovery codes safely
+
+Step 4: Assume Infrastructure Developer Role
+- Click Account Name (top right) → Switch role
+- Account: [ACCOUNT-ID]
+- Role: ask-iam-infra-developer
+- Display name: Infra-Dev (optional)
+- Click Switch role
+
+Step 5: Verify Permissions
+After switching role, you should see:
+✓ VPC console (create VPC, subnets, routes)
+✓ EC2 console (security groups)
+✓ RDS console (create databases)
+✓ OpenSearch console (create collections)
+✓ CloudWatch console (dashboards, alarms)
+✓ Secrets Manager (manage secrets)
+✓ Parameter Store (manage parameters)
+✗ IAM Users console (cannot manage users)
+✗ Billing console (cannot view costs)
+
+Step 6: Set Up Local AWS CLI (Optional)
+aws configure --profile dev-2-infra
+Enter: Access Key ID (we'll create next)
+Enter: Secret Access Key (we'll create next)
+Region: [your AWS region, e.g., us-east-1]
+
+Step 7: Proceed to Infrastructure Setup
+- Set up VPC and security groups
+- Create RDS database
+- Create OpenSearch collection
+- Set up monitoring
+- Follow Part 2-8 sections
+```
+
+### 2E: Create Access Keys for CLI/API Access
+
+1. **Go to Users**
+   - IAM → Users → `dev-2-infra`
+
+2. **Create Access Key**
+   - Click **"Security credentials"** tab
+   - Scroll to **"Access keys"**
+   - Click **"Create access key"**
+   - Use case: **"Application running outside AWS"**
+   - Click **"Create access key"**
+
+3. **Save Keys Securely**
+   - Download .csv file
+   - Share only with Developer 2 via secure channel
+   - **NEVER commit to Git**
+
+4. **Developer 2 Setup on Local Machine**
+
+```bash
+aws configure --profile dev-2-infra
+
+# Enter:
+# AWS Access Key ID: [from CSV]
+# AWS Secret Access Key: [from CSV]
+# Default region: us-east-1
+# Default output: json
+
+# Test
+aws sts get-caller-identity --profile dev-2-infra
+```
 
 ---
 
-## Step 3: Developer 1 Setup - Services They'll Deploy
+## Step 3: GitHub Repository Setup & Code Integration
+
+This section covers how to push code to GitHub and organize the repository for both developers.
+
+### 3A: Create GitHub Repository (Admin)
+
+**Prerequisites:**
+- GitHub account: https://github.com/signup
+- Git installed locally: https://git-scm.com/download/
+
+**Steps:**
+
+1. **Create Repository on GitHub**
+   - Go to: https://github.com/new
+   - Repository name: `AskIAM-Assistant`
+   - Description: `Conversational IAM bot using AWS Lambda, RDS, OpenSearch, and Lex`
+   - Visibility: **"Private"** (security best practice)
+   - Check: **"Add a README file"**
+   - Check: **"Add .gitignore"** → Template: **"Python"**
+   - Check: **"Choose a license"** → License: **"MIT"** or **"Apache 2.0"**
+   - Click **"Create repository"**
+
+2. **Configure Repository Settings**
+   - Go to **"Settings"** tab
+   - Left sidebar → **"Collaborators and teams"**
+   - Click **"Add people"**
+   - Add Developer 1: `ask-iam-dev` (GitHub username)
+   - Add Developer 2: `dev-2-infra` (GitHub username)
+   - Role: **"Maintain"** (allows push, not admin)
+
+3. **Enable Branch Protection** (prevent accidental deletions)
+   - Left sidebar → **"Branches"**
+   - Add rule for branch `main`
+   - Check: **"Require a pull request before merging"**
+   - Check: **"Require status checks to pass"** (if using CI/CD)
+   - Check: **"Require branches to be up to date before merging"**
+
+### 3B: Clone Repository Locally (Both Developers)
+
+**Developer 1:**
+
+```bash
+cd ~/Projects/  # or your development folder
+git clone https://github.com/YOUR-GITHUB-USERNAME/AskIAM-Assistant.git
+cd AskIAM-Assistant
+
+# Configure Git (first time only)
+git config user.name "Your Name"
+git config user.email "your.email@company.com"
+
+# Verify
+git config --list | grep user
+```
+
+**Developer 2:**
+
+Same steps as Developer 1 (use their GitHub username)
+
+### 3C: Repository Structure Setup
+
+Both developers should create this structure:
+
+```bash
+cd AskIAM-Assistant
+
+# Create directories
+mkdir -p backend/{orchestrator,entity-extractor,rag-validator,mcp-validator,audit-logger}
+mkdir -p infrastructure/{iam-roles,security-groups,opensearch,cloudwatch,rds}
+mkdir -p database/{migrations,sample-data}
+mkdir -p docs
+mkdir -p tests
+mkdir -p .github/workflows  # for CI/CD (optional)
+
+# Create files
+touch backend/requirements.txt
+touch backend/README.md
+touch infrastructure/README.md
+touch database/README.md
+touch tests/README.md
+touch .gitignore
+touch CONTRIBUTING.md
+touch DEPLOYMENT.md
+```
+
+**Developer 1 creates backend files:**
+
+```bash
+cd backend/orchestrator
+touch lambda_function.py requirements.txt test_orchestrator.py
+```
+
+**Developer 2 creates infrastructure files:**
+
+```bash
+cd infrastructure/iam-roles
+touch lambda-execution-role.json backend-developer-policy.json infra-developer-policy.json
+```
+
+### 3D: Create .gitignore
+
+Add this to `.gitignore` (CRITICAL - never commit secrets):
+
+```
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# AWS
+.aws/
+aws_config.json
+
+# Environment variables and secrets
+.env
+.env.local
+.env.*.local
+secrets.json
+secrets.yaml
+*.key
+*.pem
+*.p8
+*.p12
+.private/
+
+# Credentials
+credentials.json
+credentials.yaml
+access_keys.csv
+secret_key.txt
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# OS
+Thumbs.db
+
+# Logs
+*.log
+logs/
+*.pot
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+dump.sql
+
+# AWS SAM
+.aws-sam/
+build/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Temporary
+tmp/
+temp/
+*.tmp
+```
+
+### 3E: Git Workflow for Collaboration
+
+#### Developer 1 Workflow (Backend):
+
+```bash
+# Step 1: Create feature branch
+git checkout -b feature/orchestrator-lambda
+git branch -u origin/feature/orchestrator-lambda
+
+# Step 2: Make changes (edit files)
+# Edit backend/orchestrator/lambda_function.py
+# Edit backend/orchestrator/requirements.txt
+# Create tests/test_orchestrator.py
+
+# Step 3: Stage changes
+git status  # See what changed
+git add backend/orchestrator/lambda_function.py
+git add backend/orchestrator/requirements.txt
+git add tests/test_orchestrator.py
+
+# Step 4: Commit with clear message
+git commit -m "feat: implement orchestrator Lambda function
+
+- Add request routing logic
+- Handle Lambda invocations
+- Add error handling
+- Include CloudWatch metrics
+
+Closes: #1"
+
+# Step 5: Push to GitHub
+git push origin feature/orchestrator-lambda
+
+# Step 6: Create Pull Request on GitHub
+# Go to: https://github.com/YOUR-REPO/pull/new/feature/orchestrator-lambda
+# Add description and request review from Developer 2
+```
+
+#### Developer 2 Workflow (Infrastructure):
+
+```bash
+# Create feature branch for infrastructure
+git checkout -b feature/opensearch-setup
+
+# Make changes (edit files)
+# Edit infrastructure/opensearch/collection-config.yaml
+# Create infrastructure/opensearch/vector-index-schema.json
+
+# Stage and commit
+git add infrastructure/opensearch/
+git commit -m "feat: configure OpenSearch serverless collection
+
+- Set up ask-iam-collection
+- Create vector search indexes
+- Configure access policies
+
+Closes: #2"
+
+# Push and create PR
+git push origin feature/opensearch-setup
+```
+
+#### Pull Request (PR) Review Process:
+
+1. **Developer 1 creates PR** from `feature/orchestrator-lambda` → `main`
+2. **Developer 2 reviews** the code:
+   - Check for security issues
+   - Check for proper error handling
+   - Check Lambda IAM permissions
+   - Add comments if needed
+3. **Developer 2 approves** or requests changes
+4. **Developer 1 makes updates** if needed (add new commits to same branch)
+5. **Admin merges** PR to main (requires admin approval)
+6. **Delete feature branch** after merge
+
+#### Merge and Update Local Code:
+
+```bash
+# After PR is merged, sync local main branch
+git checkout main
+git pull origin main
+
+# Delete old local feature branch
+git branch -d feature/orchestrator-lambda
+
+# Verify you're on latest
+git log --oneline -5  # See last 5 commits
+```
+
+### 3F: Git Commit Message Format
+
+Use this format for consistency:
+
+```
+<type>(<scope>): <subject>
+
+<body>
+
+<footer>
+
+---
+
+Types:
+- feat: new feature
+- fix: bug fix
+- docs: documentation changes
+- style: code style (no logic changes)
+- refactor: code restructure
+- perf: performance improvement
+- test: test additions/changes
+- chore: build/dependency updates
+- ci: CI/CD changes
+
+Example:
+feat(orchestrator): add request routing logic
+
+- Route requests to entity extractor
+- Invoke RAG and MCP validators in parallel
+- Combine validation results
+- Log to CloudWatch
+
+Closes: #42
+```
+
+### 3G: Handling Merge Conflicts
+
+If both developers edit the same file:
+
+```bash
+# Update your local main
+git fetch origin
+git rebase origin/main
+
+# If conflict occurs:
+# Git will mark conflicts like:
+# <<<<<<< HEAD
+# Your changes
+# =======
+# Their changes
+# >>>>>>> origin/main
+
+# Manually resolve (keep or discard changes)
+# Then:
+git add <resolved-files>
+git rebase --continue
+git push origin <your-branch>
+```
+
+### 3H: GitHub Best Practices
+
+1. **Pull Before Pushing**
+   ```bash
+   git pull origin main  # Get latest before pushing
+   git push origin <your-branch>
+   ```
+
+2. **Never Force Push to Main**
+   ```bash
+   # DON'T DO THIS:
+   git push -f origin main  # DANGEROUS!
+   ```
+
+3. **Keep Commits Clean**
+   ```bash
+   # Before pushing, squash related commits
+   git rebase -i HEAD~3  # Squash last 3 commits
+   ```
+
+4. **Backup Important Branches**
+   ```bash
+   git branch backup/production-$(date +%Y%m%d)
+   git push origin backup/production-$(date +%Y%m%d)
+   ```
+
+5. **Tag Releases**
+   ```bash
+   git tag -a v1.0.0 -m "Version 1.0.0 - Initial release"
+   git push origin v1.0.0
+   ```
+
+---
+
+## Step 3.5: Developer Collaboration & Integration Steps
+
+### Daily Workflow Template
+
+**Morning (Start of Day):**
+
+```bash
+# Pull latest changes
+git fetch origin
+git pull origin main
+
+# Update your feature branch with latest main
+git rebase origin/main
+
+# Or merge if you prefer:
+git merge origin/main
+```
+
+**Throughout the Day:**
+
+```bash
+# Make small commits frequently
+git status
+git add <files>
+git commit -m "feat: <description>"
+
+# Push every 2-3 commits
+git push origin <your-branch>
+```
+
+**End of Day:**
+
+```bash
+# Ensure all work is pushed
+git push origin <your-branch>
+
+# Notify team in Slack/Email
+# "Pushed changes to feature/xyz-feature"
+```
+
+### Weekly Integration Checkpoint
+
+**Every Friday (End of Week):**
+
+1. **Developer 1**: Create PR for backend work
+2. **Developer 2**: Review and test backend PR
+3. **Developer 2**: Create PR for infrastructure work
+4. **Developer 1**: Review and test infrastructure PR
+5. **Admin**: Merge both PRs to main
+6. **Both**: Deploy integrated version to test environment
+
+### Deployment Steps (After PR Merge)
+
+**From Main Branch (Latest Code):**
+
+```bash
+# Pull latest from main
+git checkout main
+git pull origin main
+
+# Verify code quality
+python -m pytest tests/
+
+# Lint code
+pylint backend/
+
+# Run security check
+bandit -r backend/ infrastructure/
+
+# Deploy to AWS
+# (Use AWS CLI or SAM - covered in Part 11)
+aws cloudformation deploy --template-file template.yaml --stack-name ask-iam-prod
+
+# Tag the deployment
+git tag -a deployment-$(date +%Y%m%d-%H%M%S) -m "Production deployment"
+git push origin --tags
+```
+
+### Emergency Hotfix Process
+
+**If production bug found:**
+
+```bash
+# Create hotfix branch from main
+git checkout main
+git pull origin main
+git checkout -b hotfix/critical-bug
+
+# Make minimal fix
+# (Only 1-2 lines ideally)
+git add <files>
+git commit -m "fix: critical bug fix - [description]"
+
+# Push and create PR
+git push origin hotfix/critical-bug
+
+# Create PR, get review, merge to main
+# Deploy immediately after merge
+```
+
+---
+
+## Step 4: Complete Onboarding Checklist for Both Developers
+
+**Use this checklist to verify both developers are ready to start:**
+
+### Prerequisites Checklist
+- [ ] Both developers have AWS accounts created
+- [ ] Both have MFA enabled on their IAM users
+- [ ] Both have assumed their respective roles successfully
+- [ ] Both can access AWS console (Lambda for Dev-1, VPC for Dev-2)
+- [ ] Both have access keys created and saved locally
+- [ ] Both have AWS CLI configured on their machines
+
+### GitHub Checklist
+- [ ] GitHub repository created and private
+- [ ] Both developers added as collaborators
+- [ ] Branch protection configured on main
+- [ ] Repository cloned locally by both
+- [ ] Git configured locally (user.name, user.email)
+- [ ] .gitignore added and committed
+
+### Development Environment Checklist
+- [ ] Python 3.11+ installed
+- [ ] Virtual environment created: `python -m venv venv`
+- [ ] Dependencies installed: `pip install -r requirements.txt`
+- [ ] IDE/Editor configured (VS Code, PyCharm, etc.)
+- [ ] AWS CLI tested: `aws sts get-caller-identity --profile ask-iam-dev`
+- [ ] Can connect to AWS services
+
+### Communication Setup
+- [ ] Slack channel created: #ask-iam-dev
+- [ ] Daily standup scheduled (async or sync)
+- [ ] 1Password/LastPass shared vault for credentials
+- [ ] Documentation repository or wiki set up
+- [ ] Runbooks documented (how to deploy, troubleshoot)
+
+### Security Checklist
+- [ ] No credentials in Git
+- [ ] Environment variables used for secrets
+- [ ] Secrets Manager configured on AWS
+- [ ] Parameter Store configured on AWS
+- [ ] CloudTrail logging enabled
+- [ ] VPC security groups configured
+- [ ] Database backups enabled
+- [ ] Encryption enabled (at rest and in transit)
+
+### AWS Service Setup Checklist
+- [ ] VPC created by Dev-2
+- [ ] RDS database created by Dev-2
+- [ ] OpenSearch collection created by Dev-2
+- [ ] Lambda execution role created
+- [ ] Secrets Manager secrets created by Dev-2
+- [ ] Parameter Store parameters created by Dev-2
+- [ ] CloudWatch log groups created by Dev-2
+- [ ] Lex bot structure created by Dev-1
+- [ ] API Gateway created by Dev-1
+
+### First Integration Test
+- [ ] Dev-1 creates test Lambda function
+- [ ] Dev-1 pushes to feature branch
+- [ ] Dev-2 reviews and approves PR
+- [ ] PR merged to main
+- [ ] Dev-2 reviews infrastructure
+- [ ] Both test full end-to-end flow
+- [ ] Both commit success to Slack
+
+---
+
+## Step 5: Security Policies Summary
+
+### Developer 1 (ask-iam-dev) Permissions Summary
+
+**CAN DO:**
+✅ Create, update, delete Lambda functions (ask-iam-* prefix)
+✅ Invoke Lambda functions
+✅ View RDS databases
+✅ Execute queries on RDS
+✅ View Lex bots
+✅ Create/update Lex intents and slots
+✅ View API Gateway APIs
+✅ Create/update API Gateway methods
+✅ Read secrets from Secrets Manager
+✅ Read parameters from Parameter Store
+✅ View CloudWatch logs
+✅ Create CloudWatch metrics
+
+**CANNOT DO:**
+❌ Create or manage IAM users/roles
+❌ Create or modify VPCs
+❌ Create or modify security groups
+❌ Create or modify RDS databases
+❌ Create or modify OpenSearch
+❌ Modify infrastructure policies
+❌ Access AWS Billing
+❌ Delete databases or critical resources
+
+### Developer 2 (dev-2-infra) Permissions Summary
+
+**CAN DO:**
+✅ Create and manage VPCs, subnets, routes
+✅ Create and manage security groups
+✅ Create, update, delete RDS databases
+✅ Create and manage OpenSearch collections
+✅ Create and manage CloudWatch dashboards and alarms
+✅ Create and manage secrets in Secrets Manager
+✅ Create and manage parameters in Parameter Store
+✅ Create and manage IAM roles (ask-iam-* prefix only)
+✅ Enable CloudTrail and audit logging
+✅ View CloudWatch logs
+
+**CANNOT DO:**
+❌ Create or delete IAM users
+❌ Modify AWS account settings
+❌ Access AWS Billing
+❌ Deploy Lambda functions
+❌ Create or modify Lex bots
+❌ Create or modify API Gateway endpoints directly
+❌ Delete resources outside ask-iam-* namespace
+
+### Separation of Concerns
+
+| Task | Owner | Reason |
+|------|-------|--------|
+| Lambda code | Developer 1 | Domain expertise in application logic |
+| VPC/Network | Developer 2 | Network security and infrastructure |
+| Database creation | Developer 2 | Ensures proper backup and security |
+| Database queries | Developer 1 | Application-specific logic |
+| Secrets storage | Developer 2 | Controls access, rotation |
+| Secrets retrieval | Developer 1 | Application needs credentials |
+| Monitoring setup | Developer 2 | Infrastructure metrics |
+| Application logs | Developer 1 | Troubleshooting app issues |
+| IAM policies | Developer 2 | Principle of least privilege |
+| Code review | Both | Quality and security assurance |
+
+
 
 **Developer 1** will deploy the following services:
 

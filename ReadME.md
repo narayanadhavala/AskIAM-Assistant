@@ -91,6 +91,18 @@ pip install -r requirements.txt
 ```bash
 # Start all required services
 docker-compose up -d
+
+command to enter PostgreSQL inside the Docker container
+docker exec -it iam-postgres psql -U postgres -d iamdb
+
+
+Common useful psql commands
+\l        -- list databases
+\dt       -- list tables
+\c iamdb  -- switch database
+\d users  -- describe table
+\q        -- exit
+
 ```
 
 This starts:
