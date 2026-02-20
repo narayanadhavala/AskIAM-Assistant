@@ -1,0 +1,1032 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: 'CloudFormation template for AskIAM Assistant with AWS Lex for entity extraction'
+
+Parameters:
+  EnvironmentName:
+    Description: Environment name
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+
+  DBPassword:
+    Description: PostgreSQL database password
+    Type: String
+    NoEcho: true
+    MinLength: 8
+    ConstraintDescription: Must be at least 8 characters
+
+  DBUsername:
+    Description: PostgreSQL database username
+    Type: String
+    Default: postgres
+    MinLength: 1
+    MaxLength: 16
+
+  DBName:
+    Description: PostgreSQL database name
+    Type: String
+    Default: iamdb
+    AllowedPattern: '^[a-zA-Z][a-zA-Z0-9_]*$'
+
+  OpenSearchIndexName:
+    Description: OpenSearch Serverless index name for vector storage
+    Type: String
+    Default: iam-vector-index
+    AllowedPattern: '^[a-z0-9](-*[a-z0-9])*'
+
+  OpenSearchCollectionName:
+    Description: OpenSearch Serverless collection name
+    Type: String
+    Default: iam-collection
+    AllowedPattern: '^[a-z0-9](-*[a-z0-9])*'
+
+  LLMModel:
+    Description: LLM model to use (via Bedrock)
+    Type: String
+    Default: anthropic.claude-3-sonnet-20240229-v1:0
+    AllowedValues:
+      - anthropic.claude-3-sonnet-20240229-v1:0
+      - anthropic.claude-3-haiku-20240307-v1:0
+      - anthropic.claude-3-opus-20240229-v1:0
+
+  EmbeddingModel:
+    Description: Embedding model to use (via Bedrock)
+    Type: String
+    Default: amazon.titan-embed-text-v1
+
+  DBInstanceClass:
+    Description: RDS instance class for PostgreSQL
+    Type: String
+    Default: db.t3.micro
+    AllowedValues:
+      - db.t3.micro
+      - db.t3.small
+      - db.t3.medium
+
+  LogRetentionInDays:
+    Description: CloudWatch log retention in days
+    Type: Number
+    Default: 7
+    AllowedValues: [1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1827, 3653]
+
+Resources:
+  # ==================== VPC & Networking ====================
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Sub 'askiam-vpc-${EnvironmentName}'
+
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: true
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.2.0/24
+      AvailabilityZone: !Select [1, !GetAZs '']
+      MapPublicIpOnLaunch: true
+
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.10.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.11.0/24
+      AvailabilityZone: !Select [1, !GetAZs '']
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  SubnetRouteTableAssociation1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref PublicRouteTable
+
+  SubnetRouteTableAssociation2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet2
+      RouteTableId: !Ref PublicRouteTable
+
+  # ==================== Security Groups ====================
+  DBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for RDS PostgreSQL
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          CidrIp: 10.0.0.0/16
+          Description: Allow PostgreSQL from VPC
+
+  LambdaSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for Lambda functions
+      VpcId: !Ref VPC
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+          Description: Allow all outbound traffic
+
+  # ==================== RDS PostgreSQL ====================
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Subnet group for RDS
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      Tags:
+        - Key: Name
+          Value: !Sub 'askiam-db-subnet-${EnvironmentName}'
+
+  PostgresDB:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Delete
+    Properties:
+      DBInstanceIdentifier: !Sub 'askiam-db-${EnvironmentName}'
+      Engine: postgres
+      EngineVersion: '15.3'
+      DBInstanceClass: !Ref DBInstanceClass
+      AllocatedStorage: '20'
+      StorageType: gp2
+      MasterUsername: !Ref DBUsername
+      MasterUserPassword: !Ref DBPassword
+      DBName: !Ref DBName
+      VPCSecurityGroups:
+        - !Ref DBSecurityGroup
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      BackupRetentionPeriod: 7
+      PreferredBackupWindow: '03:00-04:00'
+      PreferredMaintenanceWindow: 'sun:04:00-sun:05:00'
+      EnableCloudwatchLogsExports:
+        - postgresql
+      EnableIAMDatabaseAuthentication: true
+      StorageEncrypted: true
+      DeletionProtection: false
+      EnableDeletionProtection: false
+      Tags:
+        - Key: Name
+          Value: !Sub 'askiam-db-${EnvironmentName}'
+
+  # ==================== OpenSearch Serverless ====================
+  OpenSearchSecurityPolicy:
+    Type: AWS::OpenSearchServerless::SecurityPolicy
+    Properties:
+      Name: !Sub 'askiam-security-policy-${EnvironmentName}'
+      Type: encryption
+      Description: Encryption policy for AskIAM
+      Policy: !Sub |
+        {
+          "Rules": [
+            {
+              "ResourceType": "collection",
+              "Resource": ["collection/${OpenSearchCollectionName}"]
+            }
+          ],
+          "AWSOwnedKey": true
+        }
+
+  OpenSearchNetworkPolicy:
+    Type: AWS::OpenSearchServerless::SecurityPolicy
+    Properties:
+      Name: !Sub 'askiam-network-policy-${EnvironmentName}'
+      Type: network
+      Description: Network policy for AskIAM
+      Policy: !Sub |
+        [
+          {
+            "Rules": [
+              {
+                "ResourceType": "collection",
+                "Resource": ["collection/${OpenSearchCollectionName}"]
+              },
+              {
+                "ResourceType": "dashboard",
+                "Resource": ["collection/${OpenSearchCollectionName}"]
+              }
+            ],
+            "AllowFromPublic": true
+          }
+        ]
+
+  OpenSearchCollection:
+    Type: AWS::OpenSearchServerless::Collection
+    DependsOn:
+      - OpenSearchSecurityPolicy
+      - OpenSearchNetworkPolicy
+    Properties:
+      Name: !Ref OpenSearchCollectionName
+      Type: VECTORSEARCH
+      Description: Vector search collection for IAM metadata
+
+  OpenSearchAccessPolicy:
+    Type: AWS::OpenSearchServerless::AccessPolicy
+    Properties:
+      Name: !Sub 'askiam-access-policy-${EnvironmentName}'
+      Type: data
+      Description: Data access policy for AskIAM
+      Policy: !Sub |
+        [
+          {
+            "Rules": [
+              {
+                "ResourceType": "index",
+                "Resource": ["index/${OpenSearchCollectionName}/*"],
+                "Permission": [
+                  "aoss:CreateIndex",
+                  "aoss:UpdateIndex",
+                  "aoss:DescribeIndex",
+                  "aoss:ReadDocument",
+                  "aoss:WriteDocument"
+                ]
+              },
+              {
+                "ResourceType": "collection",
+                "Resource": ["collection/${OpenSearchCollectionName}"],
+                "Permission": ["aoss:*"]
+              }
+            ],
+            "Principal": ["${LambdaExecutionRole.Arn}", "${BedrockLambdaExecutionRole.Arn}"]
+          }
+        ]
+
+  # ==================== DynamoDB Tables ====================
+  ChatLogsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub 'askiam-chat-logs-${EnvironmentName}'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: request_id
+          AttributeType: S
+        - AttributeName: timestamp
+          AttributeType: N
+      KeySchema:
+        - AttributeName: request_id
+          KeyType: HASH
+        - AttributeName: timestamp
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: UserIdIndex
+          KeySchema:
+            - AttributeName: user_id
+              KeyType: HASH
+            - AttributeName: timestamp
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      TTL:
+        AttributeName: expiration_time
+        Enabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+      Tags:
+        - Key: Name
+          Value: !Sub 'askiam-chat-logs-${EnvironmentName}'
+
+  RequestStateTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub 'askiam-request-state-${EnvironmentName}'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: request_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: request_id
+          KeyType: HASH
+      TTL:
+        AttributeName: expiration_time
+        Enabled: true
+      Tags:
+        - Key: Name
+          Value: !Sub 'askiam-request-state-${EnvironmentName}'
+
+  # ==================== S3 Buckets ====================
+  UIBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'askiam-ui-${AWS::AccountId}-${EnvironmentName}'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      VersioningConfiguration:
+        Status: Enabled
+      Tags:
+        - Key: Name
+          Value: !Sub 'askiam-ui-${EnvironmentName}'
+
+  ModelArtifactsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'askiam-artifacts-${AWS::AccountId}-${EnvironmentName}'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      VersioningConfiguration:
+        Status: Enabled
+      Tags:
+        - Key: Name
+          Value: !Sub 'askiam-artifacts-${EnvironmentName}'
+
+  # ==================== IAM Roles & Policies ====================
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+      Policies:
+        - PolicyName: DynamoDBAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                  - dynamodb:UpdateItem
+                Resource:
+                  - !GetAtt ChatLogsTable.Arn
+                  - !GetAtt RequestStateTable.Arn
+                  - !Sub '${ChatLogsTable.Arn}/index/*'
+        - PolicyName: S3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                Resource:
+                  - !Sub '${ModelArtifactsBucket.Arn}/*'
+        - PolicyName: SecretsManagerAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:askiam-*'
+        - PolicyName: CloudWatchLogs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/askiam-*'
+        - PolicyName: OpenSearchAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - aoss:APIAccessAll
+                Resource: !Sub 'arn:aws:aoss:${AWS::Region}:${AWS::AccountId}:collection/${OpenSearchCollectionName}'
+
+  BedrockLambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+        - arn:aws:iam::aws:policy/AmazonBedrockFullAccess
+      Policies:
+        - PolicyName: DynamoDBAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                  - dynamodb:UpdateItem
+                Resource:
+                  - !GetAtt ChatLogsTable.Arn
+                  - !GetAtt RequestStateTable.Arn
+        - PolicyName: CloudWatchLogs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/askiam-*'
+        - PolicyName: OpenSearchAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - aoss:APIAccessAll
+                Resource: !Sub 'arn:aws:aoss:${AWS::Region}:${AWS::AccountId}:collection/${OpenSearchCollectionName}'
+
+  # Lex execution role
+  LexExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lexv2.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: LexLambdaInvoke
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource:
+                  - !GetAtt LexFulfillmentFunction.Arn
+              - Effect: Allow
+                Action:
+                  - kendra:Query
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - polly:SynthesizeSpeech
+                Resource: '*'
+
+  DBSecretRotationRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  DBSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub 'askiam-db-credentials-${EnvironmentName}'
+      Description: PostgreSQL database credentials for AskIAM
+      SecretString: !Sub |
+        {
+          "username": "${DBUsername}",
+          "password": "${DBPassword}",
+          "host": "${PostgresDB.Endpoint.Address}",
+          "port": 5432,
+          "dbname": "${DBName}"
+        }
+
+  # ==================== Lambda Functions ====================
+
+  # Lex Fulfillment Lambda - Entity extraction and business logic
+  LexFulfillmentFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'askiam-lex-fulfillment-${EnvironmentName}'
+      CodeUri: s3://askiam-src/lex-fulfillment.zip
+      Handler: index.handler
+      Runtime: python3.11
+      Timeout: 60
+      MemorySize: 512
+      Environment:
+        Variables:
+          DB_SECRET_ARN: !Ref DBSecret
+          CHAT_LOGS_TABLE: !Ref ChatLogsTable
+          REQUEST_STATE_TABLE: !Ref RequestStateTable
+          OPENSEARCH_COLLECTION: !Ref OpenSearchCollectionName
+          BEDROCK_MODEL_ID: !Ref LLMModel
+          BEDROCK_EMBEDDING_MODEL: !Ref EmbeddingModel
+          ENVIRONMENT: !Ref EnvironmentName
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref LambdaSecurityGroup
+        SubnetIds:
+          - !Ref PrivateSubnet1
+          - !Ref PrivateSubnet2
+      Role: !GetAtt BedrockLambdaExecutionRole.Arn
+      Tags:
+        Environment: !Ref EnvironmentName
+
+  # Request Processing Lambda
+  RequestProcessorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'askiam-request-processor-${EnvironmentName}'
+      CodeUri: s3://askiam-src/request-processor.zip
+      Handler: index.handler
+      Runtime: python3.11
+      Timeout: 60
+      MemorySize: 512
+      Environment:
+        Variables:
+          DB_SECRET_ARN: !Ref DBSecret
+          CHAT_LOGS_TABLE: !Ref ChatLogsTable
+          REQUEST_STATE_TABLE: !Ref RequestStateTable
+          OPENSEARCH_COLLECTION: !Ref OpenSearchCollectionName
+          ENVIRONMENT: !Ref EnvironmentName
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref LambdaSecurityGroup
+        SubnetIds:
+          - !Ref PrivateSubnet1
+          - !Ref PrivateSubnet2
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Tags:
+        Environment: !Ref EnvironmentName
+
+  # Entity Validation Lambda
+  EntityValidatorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'askiam-entity-validator-${EnvironmentName}'
+      CodeUri: s3://askiam-src/entity-validator.zip
+      Handler: index.handler
+      Runtime: python3.11
+      Timeout: 30
+      MemorySize: 256
+      Environment:
+        Variables:
+          DB_SECRET_ARN: !Ref DBSecret
+          ENVIRONMENT: !Ref EnvironmentName
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref LambdaSecurityGroup
+        SubnetIds:
+          - !Ref PrivateSubnet1
+          - !Ref PrivateSubnet2
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Tags:
+        Environment: !Ref EnvironmentName
+
+  # RAG Query Lambda using Bedrock
+  RAGQueryFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'askiam-rag-query-${EnvironmentName}'
+      CodeUri: s3://askiam-src/rag-query.zip
+      Handler: index.handler
+      Runtime: python3.11
+      Timeout: 60
+      MemorySize: 512
+      Environment:
+        Variables:
+          OPENSEARCH_COLLECTION: !Ref OpenSearchCollectionName
+          OPENSEARCH_INDEX: !Ref OpenSearchIndexName
+          BEDROCK_MODEL_ID: !Ref LLMModel
+          BEDROCK_EMBEDDING_MODEL: !Ref EmbeddingModel
+          ENVIRONMENT: !Ref EnvironmentName
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref LambdaSecurityGroup
+        SubnetIds:
+          - !Ref PrivateSubnet1
+          - !Ref PrivateSubnet2
+      Role: !GetAtt BedrockLambdaExecutionRole.Arn
+      Tags:
+        Environment: !Ref EnvironmentName
+
+  # Pipeline Orchestrator Lambda
+  PipelineOrchestratorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'askiam-orchestrator-${EnvironmentName}'
+      CodeUri: s3://askiam-src/orchestrator.zip
+      Handler: index.handler
+      Runtime: python3.11
+      Timeout: 120
+      MemorySize: 1024
+      Environment:
+        Variables:
+          REQUEST_PROCESSOR_ARN: !GetAtt RequestProcessorFunction.Arn
+          ENTITY_VALIDATOR_ARN: !GetAtt EntityValidatorFunction.Arn
+          RAG_QUERY_ARN: !GetAtt RAGQueryFunction.Arn
+          CHAT_LOGS_TABLE: !Ref ChatLogsTable
+          REQUEST_STATE_TABLE: !Ref RequestStateTable
+          ENVIRONMENT: !Ref EnvironmentName
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Tags:
+        Environment: !Ref EnvironmentName
+
+  # ==================== AWS Lex V2 Configuration ====================
+  # Note: AWS Lex V2 has limited CloudFormation support
+  # Only the Bot resource is created here.
+  # Locales, Intents, and Slots must be created via AWS CLI or Lambda (see deployment guide)
+
+  # Lex Bot
+  LexBot:
+    Type: AWS::Lex::Bot
+    Properties:
+      Name: !Sub 'AskIAM-Bot-${EnvironmentName}'
+      Description: IAM Access Request Bot with entity extraction (Configure via CLI)
+      RoleArn: !GetAtt LexExecutionRole.Arn
+      DataPrivacy:
+        ChildDirected: false
+      IdleSessionTTLInSeconds: 900
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  # Lambda Permission for Lex
+  LexLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref LexFulfillmentFunction
+      Action: lambda:InvokeFunction
+      Principal: lexv2.amazonaws.com
+      SourceArn: !Sub 'arn:aws:lex:${AWS::Region}:${AWS::AccountId}:bot/*'
+
+  # ==================== API Gateway ====================
+  AskIAMApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: !Sub 'askiam-api-${EnvironmentName}'
+      Description: API Gateway for AskIAM Assistant with Lex
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+
+  LexProxyResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref AskIAMApi
+      ParentId: !GetAtt AskIAMApi.RootResourceId
+      PathPart: lex
+
+  LexProxyMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref AskIAMApi
+      ResourceId: !Ref LexProxyResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LexFulfillmentFunction.Arn}/invocations'
+
+  ChatResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref AskIAMApi
+      ParentId: !GetAtt AskIAMApi.RootResourceId
+      PathPart: chat
+
+  ChatMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref AskIAMApi
+      ResourceId: !Ref ChatResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${PipelineOrchestratorFunction.Arn}/invocations'
+
+  ValidateResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref AskIAMApi
+      ParentId: !GetAtt AskIAMApi.RootResourceId
+      PathPart: validate
+
+  ValidateMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref AskIAMApi
+      ResourceId: !Ref ValidateResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${EntityValidatorFunction.Arn}/invocations'
+
+  ApiDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn:
+      - LexProxyMethod
+      - ChatMethod
+      - ValidateMethod
+    Properties:
+      RestApiId: !Ref AskIAMApi
+
+  ApiStage:
+    Type: AWS::ApiGateway::Stage
+    Properties:
+      StageName: !Ref EnvironmentName
+      RestApiId: !Ref AskIAMApi
+      DeploymentId: !Ref ApiDeployment
+      MethodSettings:
+        - ResourcePath: '/*'
+          HttpMethod: '*'
+          LoggingLevel: INFO
+          DataTraceEnabled: true
+          MetricsEnabled: true
+
+  ApiLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/api-gateway/askiam-${EnvironmentName}'
+      RetentionInDays: !Ref LogRetentionInDays
+
+  # ==================== Lambda Permissions ====================
+  PipelineOrchestratorApiPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref PipelineOrchestratorFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${AskIAMApi}/*/*'
+
+  EntityValidatorApiPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref EntityValidatorFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${AskIAMApi}/*/*'
+
+  LexProxyApiPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref LexFulfillmentFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${AskIAMApi}/*/*'
+
+  # ==================== CloudWatch Alarms ====================
+  DBCPUAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'askiam-db-cpu-${EnvironmentName}'
+      AlarmDescription: Alert when DB CPU exceeds 80%
+      MetricName: CPUUtilization
+      Namespace: AWS/RDS
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 80
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref PostgresDB
+
+  LambdaErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'askiam-lambda-errors-${EnvironmentName}'
+      AlarmDescription: Alert when Lambda functions have errors
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanThreshold
+
+  # ==================== CloudWatch Log Groups ====================
+  LexFulfillmentLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/askiam-lex-fulfillment-${EnvironmentName}'
+      RetentionInDays: !Ref LogRetentionInDays
+
+  RequestProcessorLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/askiam-request-processor-${EnvironmentName}'
+      RetentionInDays: !Ref LogRetentionInDays
+
+  EntityValidatorLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/askiam-entity-validator-${EnvironmentName}'
+      RetentionInDays: !Ref LogRetentionInDays
+
+  RAGQueryLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/askiam-rag-query-${EnvironmentName}'
+      RetentionInDays: !Ref LogRetentionInDays
+
+  PipelineOrchestratorLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/askiam-orchestrator-${EnvironmentName}'
+      RetentionInDays: !Ref LogRetentionInDays
+
+Outputs:
+  LexBotId:
+    Description: AWS Lex Bot ID - Use with CLI to configure locales, intents, and slots
+    Value: !Ref LexBot
+    Export:
+      Name: !Sub 'askiam-lex-bot-id-${EnvironmentName}'
+
+  LexBotName:
+    Description: AWS Lex Bot Name
+    Value: !Sub 'AskIAM-Bot-${EnvironmentName}'
+    Export:
+      Name: !Sub 'askiam-lex-bot-name-${EnvironmentName}'
+
+  LexConfigurationNote:
+    Description: Important - See LEX_DEPLOYMENT_GUIDE.md for CLI commands to configure bot locales, intents, and slots
+    Value: !Sub 'Bot created. Configure via AWS CLI: aws lexv2-models create-bot-locale --bot-id ${LexBot}'
+
+  LexFulfillmentFunctionArn:
+    Description: ARN of Lex Fulfillment Lambda function
+    Value: !GetAtt LexFulfillmentFunction.Arn
+    Export:
+      Name: !Sub 'askiam-lex-fulfillment-arn-${EnvironmentName}'
+
+  DBEndpoint:
+    Description: PostgreSQL database endpoint
+    Value: !GetAtt PostgresDB.Endpoint.Address
+    Export:
+      Name: !Sub 'askiam-db-endpoint-${EnvironmentName}'
+
+  DBPort:
+    Description: PostgreSQL database port
+    Value: !GetAtt PostgresDB.Endpoint.Port
+    Export:
+      Name: !Sub 'askiam-db-port-${EnvironmentName}'
+
+  DBSecretArn:
+    Description: ARN of the database secret
+    Value: !Ref DBSecret
+    Export:
+      Name: !Sub 'askiam-db-secret-${EnvironmentName}'
+
+  OpenSearchCollectionArn:
+    Description: OpenSearch Serverless collection ARN
+    Value: !GetAtt OpenSearchCollection.Arn
+    Export:
+      Name: !Sub 'askiam-opensearch-arn-${EnvironmentName}'
+
+  ChatLogsTableName:
+    Description: DynamoDB chat logs table name
+    Value: !Ref ChatLogsTable
+    Export:
+      Name: !Sub 'askiam-chat-logs-table-${EnvironmentName}'
+
+  RequestStateTableName:
+    Description: DynamoDB request state table name
+    Value: !Ref RequestStateTable
+    Export:
+      Name: !Sub 'askiam-request-state-table-${EnvironmentName}'
+
+  UIBucketName:
+    Description: S3 bucket for UI files
+    Value: !Ref UIBucket
+    Export:
+      Name: !Sub 'askiam-ui-bucket-${EnvironmentName}'
+
+  ModelArtifactsBucketName:
+    Description: S3 bucket for model artifacts
+    Value: !Ref ModelArtifactsBucket
+    Export:
+      Name: !Sub 'askiam-artifacts-bucket-${EnvironmentName}'
+
+  ApiEndpoint:
+    Description: API Gateway endpoint URL
+    Value: !Sub 'https://${AskIAMApi}.execute-api.${AWS::Region}.amazonaws.com/${EnvironmentName}'
+    Export:
+      Name: !Sub 'askiam-api-endpoint-${EnvironmentName}'
+
+  LexProxyUrl:
+    Description: Lex proxy API endpoint for Lex interactions
+    Value: !Sub 'https://${AskIAMApi}.execute-api.${AWS::Region}.amazonaws.com/${EnvironmentName}/lex'
+    Export:
+      Name: !Sub 'askiam-lex-proxy-url-${EnvironmentName}'
+
+  ChatApiUrl:
+    Description: Chat API endpoint (legacy, use Lex proxy for new implementation)
+    Value: !Sub 'https://${AskIAMApi}.execute-api.${AWS::Region}.amazonaws.com/${EnvironmentName}/chat'
+    Export:
+      Name: !Sub 'askiam-chat-api-${EnvironmentName}'
+
+  ValidateApiUrl:
+    Description: Entity validation API endpoint
+    Value: !Sub 'https://${AskIAMApi}.execute-api.${AWS::Region}.amazonaws.com/${EnvironmentName}/validate'
+    Export:
+      Name: !Sub 'askiam-validate-api-${EnvironmentName}'
+
+  PipelineOrchestratorFunctionArn:
+    Description: ARN of the Pipeline Orchestrator Lambda function
+    Value: !GetAtt PipelineOrchestratorFunction.Arn
+    Export:
+      Name: !Sub 'askiam-orchestrator-arn-${EnvironmentName}'
+
+  RequestProcessorFunctionArn:
+    Description: ARN of the Request Processor Lambda function
+    Value: !GetAtt RequestProcessorFunction.Arn
+    Export:
+      Name: !Sub 'askiam-request-processor-arn-${EnvironmentName}'
+
+  EntityValidatorFunctionArn:
+    Description: ARN of the Entity Validator Lambda function
+    Value: !GetAtt EntityValidatorFunction.Arn
+    Export:
+      Name: !Sub 'askiam-entity-validator-arn-${EnvironmentName}'
+
+  RAGQueryFunctionArn:
+    Description: ARN of the RAG Query Lambda function
+    Value: !GetAtt RAGQueryFunction.Arn
+    Export:
+      Name: !Sub 'askiam-rag-query-arn-${EnvironmentName}'
+
+  VPCId:
+    Description: VPC ID
+    Value: !Ref VPC
+    Export:
+      Name: !Sub 'askiam-vpc-id-${EnvironmentName}'
+
+  DBSecurityGroupId:
+    Description: Database security group ID
+    Value: !Ref DBSecurityGroup
+    Export:
+      Name: !Sub 'askiam-db-sg-${EnvironmentName}'
+
+  EnvironmentName:
+    Description: Deployed environment name
+    Value: !Ref EnvironmentName
