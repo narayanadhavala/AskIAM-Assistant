@@ -20,11 +20,9 @@ from mcp.validators import _is_error_result
 class TestValidateSQLTool:
     """Test SQL validation tool (validate_sql_tool)."""
     
-    @patch('mcp.tools.sql_validator.get_tracer')
-    def test_valid_simple_select(self, mock_tracer):
+    def test_valid_simple_select(self):
         """Test valid simple SELECT statement."""
         from mcp.tools.sql_validator import validate_sql_tool
-        mock_tracer.return_value.is_enabled.return_value = False
         
         result = validate_sql_tool.invoke({
             'sql': 'SELECT * FROM Users',
@@ -32,11 +30,9 @@ class TestValidateSQLTool:
         })
         assert result == "ok"
     
-    @patch('mcp.tools.sql_validator.get_tracer')
-    def test_reject_insert_keyword(self, mock_tracer):
+    def test_reject_insert_keyword(self):
         """Test INSERT keyword rejection."""
         from mcp.tools.sql_validator import validate_sql_tool
-        mock_tracer.return_value.is_enabled.return_value = False
         
         with pytest.raises(ValueError, match="Only SELECT"):
             validate_sql_tool.invoke({
@@ -44,11 +40,9 @@ class TestValidateSQLTool:
                 'allowed_table': 'Users'
             })
     
-    @patch('mcp.tools.sql_validator.get_tracer')
-    def test_reject_update_keyword(self, mock_tracer):
+    def test_reject_update_keyword(self):
         """Test UPDATE keyword rejection."""
         from mcp.tools.sql_validator import validate_sql_tool
-        mock_tracer.return_value.is_enabled.return_value = False
         
         with pytest.raises(ValueError, match="Only SELECT"):
             validate_sql_tool.invoke({
@@ -56,11 +50,9 @@ class TestValidateSQLTool:
                 'allowed_table': 'Users'
             })
     
-    @patch('mcp.tools.sql_validator.get_tracer')
-    def test_reject_delete_keyword(self, mock_tracer):
+    def test_reject_delete_keyword(self):
         """Test DELETE keyword rejection."""
         from mcp.tools.sql_validator import validate_sql_tool
-        mock_tracer.return_value.is_enabled.return_value = False
         
         with pytest.raises(ValueError, match="Only SELECT"):
             validate_sql_tool.invoke({
@@ -68,11 +60,9 @@ class TestValidateSQLTool:
                 'allowed_table': 'Users'
             })
     
-    @patch('mcp.tools.sql_validator.get_tracer')
-    def test_reject_union_keyword(self, mock_tracer):
+    def test_reject_union_keyword(self):
         """Test UNION keyword rejection."""
         from mcp.tools.sql_validator import validate_sql_tool
-        mock_tracer.return_value.is_enabled.return_value = False
         
         with pytest.raises(ValueError, match="Forbidden SQL keyword"):
             validate_sql_tool.invoke({
@@ -80,11 +70,9 @@ class TestValidateSQLTool:
                 'allowed_table': 'Users'
             })
     
-    @patch('mcp.tools.sql_validator.get_tracer')
-    def test_reject_join_keyword(self, mock_tracer):
+    def test_reject_join_keyword(self):
         """Test JOIN keyword rejection."""
         from mcp.tools.sql_validator import validate_sql_tool
-        mock_tracer.return_value.is_enabled.return_value = False
         
         with pytest.raises(ValueError, match="Forbidden SQL keyword"):
             validate_sql_tool.invoke({
@@ -92,96 +80,80 @@ class TestValidateSQLTool:
                 'allowed_table': 'Users'
             })
     
-    @patch('mcp.tools.sql_validator.get_tracer')
-    def test_reject_non_select(self, mock_tracer):
+    def test_reject_non_select(self):
         """Test rejection of non-SELECT queries."""
         from mcp.tools.sql_validator import validate_sql_tool
-        mock_tracer.return_value.is_enabled.return_value = False
-        
+
         with pytest.raises(ValueError, match="Only SELECT statements"):
             validate_sql_tool.invoke({
                 'sql': 'DESCRIBE Users',
                 'allowed_table': 'Users'
             })
     
-    @patch('mcp.tools.sql_validator.get_tracer')
-    def test_reject_multiple_statements(self, mock_tracer):
+    def test_reject_multiple_statements(self):
         """Test rejection of multiple statements."""
         from mcp.tools.sql_validator import validate_sql_tool
-        mock_tracer.return_value.is_enabled.return_value = False
-        
+
         with pytest.raises(ValueError, match="Multiple SQL statements"):
             validate_sql_tool.invoke({
                 'sql': 'SELECT * FROM Users; DROP TABLE Users',
                 'allowed_table': 'Users'
             })
     
-    @patch('mcp.tools.sql_validator.get_tracer')
-    def test_reject_missing_from_clause(self, mock_tracer):
+    def test_reject_missing_from_clause(self):
         """Test rejection of queries without FROM clause."""
         from mcp.tools.sql_validator import validate_sql_tool
-        mock_tracer.return_value.is_enabled.return_value = False
-        
+
         with pytest.raises(ValueError, match="FROM clause"):
             validate_sql_tool.invoke({
                 'sql': 'SELECT 1',
                 'allowed_table': 'Users'
             })
     
-    @patch('mcp.tools.sql_validator.get_tracer')
-    def test_reject_unauthorized_table(self, mock_tracer):
+    def test_reject_unauthorized_table(self):
         """Test rejection of unauthorized table."""
         from mcp.tools.sql_validator import validate_sql_tool
-        mock_tracer.return_value.is_enabled.return_value = False
-        
+
         with pytest.raises(ValueError, match="Unauthorized table"):
             validate_sql_tool.invoke({
                 'sql': 'SELECT * FROM UnauthorizedTable',
                 'allowed_table': 'Users'
             })
     
-    @patch('mcp.tools.sql_validator.get_tracer')
-    def test_whitespace_handling(self, mock_tracer):
+    def test_whitespace_handling(self):
         """Test handling of extra whitespace."""
         from mcp.tools.sql_validator import validate_sql_tool
-        mock_tracer.return_value.is_enabled.return_value = False
-        
+
         result = validate_sql_tool.invoke({
             'sql': '  SELECT  *  FROM  Users  ',
             'allowed_table': 'Users'
         })
         assert result == "ok"
     
-    @patch('mcp.tools.sql_validator.get_tracer')
-    def test_newlines_in_sql(self, mock_tracer):
+    def test_newlines_in_sql(self):
         """Test handling of newlines in SQL."""
         from mcp.tools.sql_validator import validate_sql_tool
-        mock_tracer.return_value.is_enabled.return_value = False
-        
+
         result = validate_sql_tool.invoke({
             'sql': 'SELECT *\nFROM Users\nWHERE id = 1',
             'allowed_table': 'Users'
         })
         assert result == "ok"
     
-    @patch('mcp.tools.sql_validator.get_tracer')
-    def test_case_insensitive_keywords(self, mock_tracer):
+    def test_case_insensitive_keywords(self):
         """Test case insensitivity of keywords."""
         from mcp.tools.sql_validator import validate_sql_tool
-        mock_tracer.return_value.is_enabled.return_value = False
-        
+
         result = validate_sql_tool.invoke({
             'sql': 'select * from Users',
             'allowed_table': 'Users'
         })
         assert result == "ok"
     
-    @patch('mcp.tools.sql_validator.get_tracer')
-    def test_keyword_in_string_literal(self, mock_tracer):
+    def test_keyword_in_string_literal(self):
         """Test keywords inside string literals are allowed."""
         from mcp.tools.sql_validator import validate_sql_tool
-        mock_tracer.return_value.is_enabled.return_value = False
-        
+
         # Note: The validator doesn't distinguish between keywords in literals vs keywords
         # This test documents current behavior - delete keyword still triggers rejection
         with pytest.raises(ValueError, match="Forbidden SQL keyword"):
@@ -190,60 +162,50 @@ class TestValidateSQLTool:
                 'allowed_table': 'Users'
             })
     
-    @patch('mcp.tools.sql_validator.get_tracer')
-    def test_select_with_limit(self, mock_tracer):
+    def test_select_with_limit(self):
         """Test SELECT with LIMIT clause."""
         from mcp.tools.sql_validator import validate_sql_tool
-        mock_tracer.return_value.is_enabled.return_value = False
-        
+
         result = validate_sql_tool.invoke({
             'sql': 'SELECT id, name FROM Users LIMIT 10',
             'allowed_table': 'Users'
         })
         assert result == "ok"
     
-    @patch('mcp.tools.sql_validator.get_tracer')
-    def test_select_with_where_clause(self, mock_tracer):
+    def test_select_with_where_clause(self):
         """Test SELECT with WHERE clause."""
         from mcp.tools.sql_validator import validate_sql_tool
-        mock_tracer.return_value.is_enabled.return_value = False
-        
+
         result = validate_sql_tool.invoke({
             'sql': 'SELECT * FROM Users WHERE id = 1',
             'allowed_table': 'Users'
         })
         assert result == "ok"
     
-    @patch('mcp.tools.sql_validator.get_tracer')
-    def test_select_with_order_by(self, mock_tracer):
+    def test_select_with_order_by(self):
         """Test SELECT with ORDER BY clause."""
         from mcp.tools.sql_validator import validate_sql_tool
-        mock_tracer.return_value.is_enabled.return_value = False
-        
+
         result = validate_sql_tool.invoke({
             'sql': 'SELECT * FROM Users ORDER BY name ASC',
             'allowed_table': 'Users'
         })
         assert result == "ok"
     
-    @patch('mcp.tools.sql_validator.get_tracer')
-    def test_select_with_aggregate(self, mock_tracer):
+    def test_select_with_aggregate(self):
         """Test SELECT with aggregate functions."""
         from mcp.tools.sql_validator import validate_sql_tool
-        mock_tracer.return_value.is_enabled.return_value = False
-        
+
         result = validate_sql_tool.invoke({
             'sql': 'SELECT COUNT(*), MAX(id) FROM Users',
             'allowed_table': 'Users'
         })
         assert result == "ok"
     
-    @patch('mcp.tools.sql_validator.get_tracer')
-    def test_select_with_group_by(self, mock_tracer):
+    def test_select_with_group_by(self):
         """Test SELECT with GROUP BY clause."""
         from mcp.tools.sql_validator import validate_sql_tool
-        mock_tracer.return_value.is_enabled.return_value = False
-        
+
         result = validate_sql_tool.invoke({
             'sql': 'SELECT role, COUNT(*) FROM Users GROUP BY role',
             'allowed_table': 'Users'
@@ -511,8 +473,7 @@ class TestSQLValidationBoundaryConditions:
         """Test SELECT with OFFSET 0."""
         from mcp.tools.sql_validator import validate_sql_tool
         with patch('mcp.tools.sql_validator.get_tracer') as mock_tracer:
-            mock_tracer.return_value.is_enabled.return_value = False
-            
+        
             result = validate_sql_tool.invoke({
                 'sql': 'SELECT * FROM Users LIMIT 10 OFFSET 0',
                 'allowed_table': 'Users'
@@ -523,8 +484,7 @@ class TestSQLValidationBoundaryConditions:
         """Test SELECT with huge LIMIT."""
         from mcp.tools.sql_validator import validate_sql_tool
         with patch('mcp.tools.sql_validator.get_tracer') as mock_tracer:
-            mock_tracer.return_value.is_enabled.return_value = False
-            
+        
             result = validate_sql_tool.invoke({
                 'sql': 'SELECT * FROM Users LIMIT 999999999',
                 'allowed_table': 'Users'
@@ -535,8 +495,7 @@ class TestSQLValidationBoundaryConditions:
         """Test column named 'from'."""
         from mcp.tools.sql_validator import validate_sql_tool
         with patch('mcp.tools.sql_validator.get_tracer') as mock_tracer:
-            mock_tracer.return_value.is_enabled.return_value = False
-            
+        
             result = validate_sql_tool.invoke({
                 'sql': 'SELECT "from" FROM Users',
                 'allowed_table': 'Users'
@@ -547,8 +506,7 @@ class TestSQLValidationBoundaryConditions:
         """Test column named 'select'."""
         from mcp.tools.sql_validator import validate_sql_tool
         with patch('mcp.tools.sql_validator.get_tracer') as mock_tracer:
-            mock_tracer.return_value.is_enabled.return_value = False
-            
+        
             result = validate_sql_tool.invoke({
                 'sql': 'SELECT "select" FROM Users',
                 'allowed_table': 'Users'
@@ -559,8 +517,7 @@ class TestSQLValidationBoundaryConditions:
         """Test numeric literals in WHERE clause."""
         from mcp.tools.sql_validator import validate_sql_tool
         with patch('mcp.tools.sql_validator.get_tracer') as mock_tracer:
-            mock_tracer.return_value.is_enabled.return_value = False
-            
+        
             result = validate_sql_tool.invoke({
                 'sql': 'SELECT * FROM Users WHERE id = 0 OR id = -1 OR id = 999',
                 'allowed_table': 'Users'
@@ -571,8 +528,7 @@ class TestSQLValidationBoundaryConditions:
         """Test float literals in WHERE clause."""
         from mcp.tools.sql_validator import validate_sql_tool
         with patch('mcp.tools.sql_validator.get_tracer') as mock_tracer:
-            mock_tracer.return_value.is_enabled.return_value = False
-            
+        
             result = validate_sql_tool.invoke({
                 'sql': 'SELECT * FROM Users WHERE salary > 1000.50',
                 'allowed_table': 'Users'
@@ -583,8 +539,7 @@ class TestSQLValidationBoundaryConditions:
         """Test boolean literals."""
         from mcp.tools.sql_validator import validate_sql_tool
         with patch('mcp.tools.sql_validator.get_tracer') as mock_tracer:
-            mock_tracer.return_value.is_enabled.return_value = False
-            
+        
             result = validate_sql_tool.invoke({
                 'sql': 'SELECT * FROM Users WHERE active = true OR active = false',
                 'allowed_table': 'Users'
@@ -595,8 +550,7 @@ class TestSQLValidationBoundaryConditions:
         """Test complex boolean expressions."""
         from mcp.tools.sql_validator import validate_sql_tool
         with patch('mcp.tools.sql_validator.get_tracer') as mock_tracer:
-            mock_tracer.return_value.is_enabled.return_value = False
-            
+        
             result = validate_sql_tool.invoke({
                 'sql': 'SELECT * FROM Users WHERE (a AND b) OR (c AND d) OR (e AND f)',
                 'allowed_table': 'Users'
@@ -607,8 +561,7 @@ class TestSQLValidationBoundaryConditions:
         """Test deeply nested parentheses."""
         from mcp.tools.sql_validator import validate_sql_tool
         with patch('mcp.tools.sql_validator.get_tracer') as mock_tracer:
-            mock_tracer.return_value.is_enabled.return_value = False
-            
+        
             result = validate_sql_tool.invoke({
                 'sql': 'SELECT * FROM Users WHERE ((((((a = 1)))))) AND b = 2',
                 'allowed_table': 'Users'
@@ -619,8 +572,7 @@ class TestSQLValidationBoundaryConditions:
         """Test SELECT with many columns."""
         from mcp.tools.sql_validator import validate_sql_tool
         with patch('mcp.tools.sql_validator.get_tracer') as mock_tracer:
-            mock_tracer.return_value.is_enabled.return_value = False
-            
+        
             cols = ', '.join([f'col{i}' for i in range(1000)])
             result = validate_sql_tool.invoke({
                 'sql': f'SELECT {cols} FROM Users',
@@ -632,8 +584,7 @@ class TestSQLValidationBoundaryConditions:
         """Test multiple WHERE conditions."""
         from mcp.tools.sql_validator import validate_sql_tool
         with patch('mcp.tools.sql_validator.get_tracer') as mock_tracer:
-            mock_tracer.return_value.is_enabled.return_value = False
-            
+        
             conditions = ' AND '.join([f'col{i} = {i}' for i in range(100)])
             result = validate_sql_tool.invoke({
                 'sql': f'SELECT * FROM Users WHERE {conditions}',
@@ -645,8 +596,7 @@ class TestSQLValidationBoundaryConditions:
         """Test WHERE with chained OR conditions."""
         from mcp.tools.sql_validator import validate_sql_tool
         with patch('mcp.tools.sql_validator.get_tracer') as mock_tracer:
-            mock_tracer.return_value.is_enabled.return_value = False
-            
+        
             conditions = ' OR '.join([f'status = "status{i}"' for i in range(50)])
             result = validate_sql_tool.invoke({
                 'sql': f'SELECT * FROM Users WHERE {conditions}',

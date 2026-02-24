@@ -1,5 +1,6 @@
 from core.types import IAMState
 from core.config_loader import load_config
+from core.langfuse_integration import log_event
 from mcp.tools.entity_validator import validate_entity_tool
 from mcp.tools.sql_generator import generate_sql_tool
 from mcp.tools.sql_validator import validate_sql_tool
@@ -56,6 +57,15 @@ def run_validations(state: IAMState) -> IAMState:
             }
 
             result = validate_entity_tool.invoke(tool_input)
+            
+            # Log MCP tool call
+            log_event(
+                "mcp_tool",
+                tool_name="entity_validator",
+                table=entity["table"],
+                input_params=tool_input,
+                result=result
+            )
 
             # Check for transient errors (connection issues, timeouts)
             # These should not immediately fail validation
@@ -68,17 +78,51 @@ def run_validations(state: IAMState) -> IAMState:
                 if "mcp_errors" not in state:
                     state["mcp_errors"] = []
                 state["mcp_errors"].append(f"{entity['error']}: {result}")
+                log_event(
+                    "validation",
+                    step_name=f"{key}_existence",
+                    entity_type=key,
+                    entity_value=value,
+                    is_valid=False,
+                    details={"error_type": "transient", "error_message": result}
+                )
                 continue
             
             # Check for critical errors in result
             if _is_error_result(result):
                 state["error"] = f"{entity['error']}: {result}"
+                log_event(
+                    "validation",
+                    step_name=f"{key}_existence",
+                    entity_type=key,
+                    entity_value=value,
+                    is_valid=False,
+                    details={"error_type": "critical", "error_message": result}
+                )
                 return state
             
             # Check for empty/no results (entity not found)
             if not result or result == "[]" or result == "null" or (isinstance(result, str) and result.strip() == ""):
                 state["error"] = entity["error"]
+                log_event(
+                    "validation",
+                    step_name=f"{key}_existence",
+                    entity_type=key,
+                    entity_value=value,
+                    is_valid=False,
+                    details={"error_type": "not_found"}
+                )
                 return state
+            
+            # Entity found - log successful validation
+            log_event(
+                "validation",
+                step_name=f"{key}_existence",
+                entity_type=key,
+                entity_value=value,
+                is_valid=True,
+                details={"result_summary": str(result)[:200]}
+            )
 
         # After individual entity validations, check relationships
         # Specifically: Role must belong to the requested Application
@@ -114,8 +158,23 @@ def _validate_role_application_relationship(state: IAMState) -> IAMState:
     try:
         sql = generate_sql_tool.invoke({"instruction": sql_instruction})
         
-        validate_sql_tool.invoke(
+        # Log SQL generation
+        log_event(
+            "sql",
+            operation_type="generate",
+            sql_query=sql
+        )
+        
+        validate_sql_result = validate_sql_tool.invoke(
             {"sql": sql, "allowed_table": "roles"}
+        )
+        
+        # Log SQL validation
+        log_event(
+            "sql",
+            operation_type="validate",
+            sql_query=sql,
+            validation_result=str(validate_sql_result)
         )
         
         cfg = load_config()
@@ -123,13 +182,38 @@ def _validate_role_application_relationship(state: IAMState) -> IAMState:
             sql_tool = client.load_toolset("iam")[0]
             result = sql_tool.invoke({"sql": sql})
         
+        # Log SQL execution
+        log_event(
+            "mcp_tool",
+            tool_name="sql_executor",
+            table="roles",
+            input_params={"sql": sql},
+            result=result
+        )
+        
         # Check for errors in result
         if _is_error_result(result):
             state["error"] = f"Database error during relationship validation: {result}"
+            log_event(
+                "validation",
+                step_name="role_application_relationship",
+                entity_type="role_application",
+                entity_value=f"{role_name}_in_{app_name}",
+                is_valid=False,
+                details={"error_type": "database_error", "error_message": result}
+            )
             return state
         
         # Check if result is empty
         if result and result != "[]" and result != "null" and (isinstance(result, str) and result.strip() != ""):
+            log_event(
+                "validation",
+                step_name="role_application_relationship",
+                entity_type="role_application",
+                entity_value=f"{role_name}_in_{app_name}",
+                is_valid=True,
+                details={"result_summary": str(result)[:200]}
+            )
             return state
         else:
             # Relationship invalid
@@ -137,8 +221,24 @@ def _validate_role_application_relationship(state: IAMState) -> IAMState:
                 f"Relationship invalid: {role_name} does not exist in {app_name}. "
                 f"This role may belong to a different application."
             )
+            log_event(
+                "validation",
+                step_name="role_application_relationship",
+                entity_type="role_application",
+                entity_value=f"{role_name}_in_{app_name}",
+                is_valid=False,
+                details={"error_type": "relationship_not_found"}
+            )
             return state
             
     except Exception as e:
         state["error"] = f"Relationship validation error: {str(e)}"
+        log_event(
+            "validation",
+            step_name="role_application_relationship",
+            entity_type="role_application",
+            entity_value=f"{role_name}_in_{app_name}",
+            is_valid=False,
+            details={"error_type": "exception", "error_message": str(e)}
+        )
         return state

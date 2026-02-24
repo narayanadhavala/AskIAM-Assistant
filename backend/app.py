@@ -1,25 +1,26 @@
 import sys
+import os
 import gradio as gr
 from dotenv import load_dotenv
+from threading import Thread
 from langgraph_pipeline import invoke_pipeline
 from core.config_loader import load_config
-from core.tracer import get_tracer
+from core.langfuse_integration import initialize_langfuse, flush
 
 # Load environment variables from .env file
 load_dotenv()
 
 cfg = load_config()
 
-# Check for --trace flag in command line arguments
-TRACING_ENABLED = "--trace" in sys.argv
+# Initialize Langfuse for observability
+initialize_langfuse(debug=False)
+print("📊 Langfuse observability initialized. Traces will be sent to cloud dashboard.")
 
-# Initialize tracer if enabled
-if TRACING_ENABLED:
-    tracer = get_tracer("trace.txt")
-    tracer.enable()
-    print("Tracing enabled. Traces will be written to trace.txt")
-    # Remove --trace from sys.argv so it doesn't interfere with Gradio
-    sys.argv.remove("--trace")
+
+def flush_async():
+    """Flush traces to Langfuse in background thread (non-blocking)."""
+    thread = Thread(target=flush, daemon=True)
+    thread.start()
 
 def chat(message, history):
     """Process chat message using LangGraph pipeline."""
@@ -28,6 +29,9 @@ def chat(message, history):
     
     # Invoke the LangGraph pipeline
     result = invoke_pipeline(message)
+    
+    # Flush traces to Langfuse in background (non-blocking) after pipeline completes
+    flush_async()
     
     # Update conversation history
     history.append({"role": "user", "content": message})
@@ -112,11 +116,9 @@ with gr.Blocks(
 
 
 def on_app_shutdown():
-    """Clean up resources on app shutdown."""
-    if TRACING_ENABLED:
-        tracer = get_tracer()
-        tracer.disable()
-        print(f"\nTracing completed. Check trace.txt for details.")
+    """Clean up resources on app shutdown - flush synchronously to ensure all traces are sent."""
+    import time
+    flush()  # Synchronous flush on shutdown to ensure all traces are transmitted
 
 
 # Register shutdown handler
@@ -132,4 +134,3 @@ if __name__ == "__main__":
         show_error=True,
         theme=gr.themes.Soft()
     )
-

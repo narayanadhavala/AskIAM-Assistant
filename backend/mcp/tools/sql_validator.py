@@ -1,6 +1,5 @@
 import re
 from langchain_core.tools import tool
-from core.tracer import get_tracer
 
 @tool
 def validate_sql_tool(sql: str, allowed_table: str) -> str:
@@ -44,11 +43,4 @@ def validate_sql_tool(sql: str, allowed_table: str) -> str:
     if not re.search(table_pattern, sql_clean, re.IGNORECASE):
         raise ValueError("Unauthorized table access")
 
-    result = "ok"
-    
-    # Trace tool invocation
-    tracer = get_tracer()
-    if tracer.is_enabled():
-        tracer.trace_tool("validate_sql_tool", {"sql": sql, "allowed_table": allowed_table}, result)
-    
-    return result
+    return "ok"

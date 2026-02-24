@@ -86,7 +86,8 @@ client = chromadb.HttpClient(
     port=8000
 )
 
-client.delete_collection("iam-metadata")
+if "iam-metadata" in [c.name for c in client.list_collections()]:
+    client.delete_collection(name="iam-metadata")
 print("Collection iam-metadata deleted")
 
 collections = client.list_collections()

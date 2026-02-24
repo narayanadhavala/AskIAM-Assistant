@@ -8,6 +8,7 @@ from langchain_core.prompts import SystemMessagePromptTemplate, HumanMessageProm
 from core.model_factory import create_llm
 from core.types import IAMState
 from rag.vectorstore import load_vectordb
+from core.langfuse_integration import log_event
 
 
 def _get_available_entities_context(request: str) -> str:
@@ -21,6 +22,15 @@ def _get_available_entities_context(request: str) -> str:
         # Single search with multi-entity context
         search_query = f"{request} user application role access"
         results = vectordb.similarity_search(search_query, k=15)
+        
+        # Log entity context retrieval
+        log_event(
+            "rag",
+            operation_name="entity_context_retrieval",
+            query=search_query,
+            results=results,
+            result_count=len(results) if results else 0
+        )
         
         # Organize results by entity type
         users = set()
@@ -125,27 +135,58 @@ EXAMPLES - STUDY CAREFULLY:
         # Parse JSON response
         result = json.loads(response)
         
-        # Validate and normalize output
-        return {
+        # Normalize output
+        normalized_result = {
             "user_name": result.get("user_name") or None,
             "application_name": result.get("application_name") or None,
             "role_name": result.get("role_name") or None,
             "error": None
         }
         
+        # Log individual entity extractions
+        for entity_type, entity_value in normalized_result.items():
+            if entity_type != "error":
+                log_event(
+                    "extraction",
+                    extraction_type=entity_type.replace("_name", ""),
+                    raw_request=raw_request,
+                    context_used=context,
+                    extracted_value=entity_value
+                )
+        
+        return normalized_result
+        
     except json.JSONDecodeError as e:
+        error_msg = f"JSON parsing failed: {str(e)}"
+        # Log extraction failure
+        log_event(
+            "extraction",
+            extraction_type="extraction",
+            raw_request=raw_request,
+            context_used=context,
+            extracted_value=None
+        )
         return {
             "user_name": None,
             "application_name": None,
             "role_name": None,
-            "error": f"JSON parsing failed: {str(e)}"
+            "error": error_msg
         }
     except Exception as e:
+        error_msg = f"Extraction failed: {str(e)}"
+        # Log extraction failure
+        log_event(
+            "extraction",
+            extraction_type="extraction",
+            raw_request=raw_request,
+            context_used=context,
+            extracted_value=None
+        )
         return {
             "user_name": None,
             "application_name": None,
             "role_name": None,
-            "error": f"Extraction failed: {str(e)}"
+            "error": error_msg
         }
 
 

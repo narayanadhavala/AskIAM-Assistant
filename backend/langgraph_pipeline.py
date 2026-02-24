@@ -10,7 +10,7 @@ from langgraph.graph import StateGraph, START, END
 from core.types import IAMState
 from core.model_factory import create_llm
 from core.config_loader import load_config
-from core.tracer import get_tracer
+from core.langfuse_integration import log_event, trace_request
 from mcp.extract import extract_request_unified
 from mcp.validators import run_validations
 from rag.rag_engine import validate_with_rag
@@ -29,12 +29,12 @@ def initialize_request(state: IAMState) -> IAMState:
     
     state["processing_steps"].append("initialize_request")
     
-    # Trace this node
-    tracer = get_tracer()
-    if tracer.is_enabled():
-        # Only trace relevant state parts to keep traces readable
-        trace_state = {k: v for k, v in state.items() if k in ["raw_request", "processing_steps", "error"]}
-        tracer.trace_node("initialize_request", {"raw_request": state.get("raw_request")}, trace_state)
+    log_event(
+        "node",
+        node_name="initialize_request",
+        input_data={"raw_request": state.get("raw_request")},
+        output_data={"status": "initialized", "processing_steps": state["processing_steps"]}
+    )
     
     return state
 
@@ -56,16 +56,13 @@ def extract_entities(state: IAMState) -> IAMState:
     }
     state = asyncio.run(extract_request_unified(state))
     
-    # Trace this node
-    tracer = get_tracer()
-    if tracer.is_enabled():
-        output_state = {
-            "user_name": state.get("user_name"),
-            "application_name": state.get("application_name"),
-            "role_name": state.get("role_name"),
-            "error": state.get("error")
-        }
-        tracer.trace_node("extract_entities", input_state, output_state)
+    output_state = {
+        "user_name": state.get("user_name"),
+        "application_name": state.get("application_name"),
+        "role_name": state.get("role_name"),
+        "error": state.get("error")
+    }
+    log_event("node", node_name="extract_entities", input_data=input_state, output_data=output_state)
     
     return state
 
@@ -95,14 +92,12 @@ def rag_validation(state: IAMState) -> IAMState:
             state["rag_validation"] = f"RAG_ERROR: {str(e)}"
             state["rag_documents"] = []
     
-    # Trace this node
-    tracer = get_tracer()
-    if tracer.is_enabled():
-        output_state = {
-            "rag_validation": state.get("rag_validation"),
-            "error": state.get("error")
-        }
-        tracer.trace_node("rag_validation", input_state, output_state)
+    log_event(
+        "node",
+        node_name="rag_validation",
+        input_data=input_state,
+        output_data={"rag_validation": state.get("rag_validation"), "error": state.get("error")}
+    )
     
     return state
 
@@ -141,15 +136,12 @@ def mcp_validation(state: IAMState) -> IAMState:
             state["mcp_validation"] = "FAILED"
             state["mcp_errors"] = [str(e)]
     
-    # Trace this node
-    tracer = get_tracer()
-    if tracer.is_enabled():
-        output_state = {
-            "mcp_validation": state.get("mcp_validation"),
-            "mcp_errors": state.get("mcp_errors", []),
-            "error": state.get("error")
-        }
-        tracer.trace_node("mcp_validation", input_state, output_state)
+    log_event(
+        "node",
+        node_name="mcp_validation",
+        input_data=input_state,
+        output_data={"mcp_validation": state.get("mcp_validation"), "mcp_errors": state.get("mcp_errors", [])}
+    )
     
     return state
 
@@ -198,14 +190,12 @@ def finalize_response(state: IAMState) -> IAMState:
         error_message = state["mcp_errors"][0] if state.get("mcp_errors") else "Validation failed"
         state["final_response"] = f"INVALID: {error_message}"
     
-    # Trace this node
-    tracer = get_tracer()
-    if tracer.is_enabled():
-        output_state = {
-            "is_valid": state.get("is_valid"),
-            "final_response": state.get("final_response")
-        }
-        tracer.trace_node("finalize_response", input_state, output_state)
+    log_event(
+        "node",
+        node_name="finalize_response",
+        input_data=input_state,
+        output_data={"is_valid": state.get("is_valid"), "final_response": state.get("final_response")}
+    )
     
     return state
 
@@ -284,7 +274,17 @@ def invoke_pipeline(request: str) -> str:
         "processing_steps": []
     }
     
-    # Execute the pipeline
-    result_state = pipeline.invoke(initial_state)
+    # Create a trace for this request
+    with trace_request("iam_access_validation", {"request": request}) as trace:
+        # Execute the pipeline
+        result_state = pipeline.invoke(initial_state)
+        
+        # Update trace with final result
+        trace.update(
+            output={
+                "is_valid": result_state.get("is_valid"),
+                "final_response": result_state.get("final_response")
+            }
+        )
     
     return result_state.get("final_response", "Error: No response generated")

@@ -1,5 +1,6 @@
 from core.model_factory import create_llm
 from rag.vectorstore import load_vectordb
+from core.langfuse_integration import log_event
 
 _vectordb = None
 _llm = None
@@ -33,6 +34,16 @@ def validate_with_rag(text: str, k=3, filter=None) -> str | None:
 
     # Perform similarity search with optional filter
     results = _vectordb.similarity_search(text, k=k, filter=search_filter) if search_filter else _vectordb.similarity_search(text, k=k)
+    
+    # Log RAG document retrieval
+    log_event(
+        "rag",
+        operation_name="similarity_search",
+        query=text,
+        filters=filter,
+        results=results,
+        result_count=len(results) if results else 0
+    )
     if not results:
         return None
     # search_kwargs = {"k": k, "score_threshold": 0.6}

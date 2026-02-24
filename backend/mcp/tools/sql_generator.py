@@ -5,7 +5,6 @@ from langchain_core.prompts import (
     ChatPromptTemplate,
 )
 from core.model_factory import create_llm
-from core.tracer import get_tracer
 
 @tool
 def generate_sql_tool(instruction: str) -> str:
@@ -47,11 +46,4 @@ SELECT "role_id" FROM "roles" WHERE "role_name" = 'HR Analyst' LIMIT 1
         prompt.format_messages(instruction=instruction)
     )
 
-    sql_result = result.content.strip()
-    
-    # Trace tool invocation
-    tracer = get_tracer()
-    if tracer.is_enabled():
-        tracer.trace_tool("generate_sql_tool", {"instruction": instruction}, sql_result)
-    
-    return sql_result
+    return result.content.strip()
