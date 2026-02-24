@@ -8,19 +8,21 @@ from toolbox_langchain import ToolboxClient
 
 def _is_error_result(result: str) -> bool:
     """
-    Check if a result string represents an error from the tool/database.
+    Check if a result string represents a critical error from the tool/database.
     
     Args:
         result: The result string from a tool invocation
         
     Returns:
-        True if the result indicates an error, False otherwise
+        True if the result indicates a critical error, False otherwise
     """
     if not isinstance(result, str):
         return False
     
     result_lower = result.lower()
-    error_indicators = [
+    
+    # Critical error indicators (not transient)
+    critical_indicators = [
         "error",
         "unable to execute",
         "exception",
@@ -30,7 +32,7 @@ def _is_error_result(result: str) -> bool:
         "sqlstate"
     ]
     
-    return any(indicator in result_lower for indicator in error_indicators)
+    return any(indicator in result_lower for indicator in critical_indicators)
 
 
 def run_validations(state: IAMState) -> IAMState:
@@ -55,7 +57,20 @@ def run_validations(state: IAMState) -> IAMState:
 
             result = validate_entity_tool.invoke(tool_input)
 
-            # Check for errors in result
+            # Check for transient errors (connection issues, timeouts)
+            # These should not immediately fail validation
+            if isinstance(result, str) and any(ind in result.lower() for ind in [
+                "connection reset", "connection refused", "[errno 104]", 
+                "timeout", "broken pipe", "after 3 retries"
+            ]):
+                # Log transient error but continue validation
+                # This allows other entities to be checked
+                if "mcp_errors" not in state:
+                    state["mcp_errors"] = []
+                state["mcp_errors"].append(f"{entity['error']}: {result}")
+                continue
+            
+            # Check for critical errors in result
             if _is_error_result(result):
                 state["error"] = f"{entity['error']}: {result}"
                 return state

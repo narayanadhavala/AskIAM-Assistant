@@ -3,6 +3,7 @@ LangGraph pipeline for IAM Access Validation.
 Integrates MCP (Model Context Protocol) and RAG (Retrieval Augmented Generation) as nodes.
 """
 
+import asyncio
 from typing_extensions import TypedDict
 from typing import Optional, List
 from langgraph.graph import StateGraph, START, END
@@ -10,7 +11,7 @@ from core.types import IAMState
 from core.model_factory import create_llm
 from core.config_loader import load_config
 from core.tracer import get_tracer
-from mcp.extract import extract_request_parallel_sync
+from mcp.extract import extract_request_unified
 from mcp.validators import run_validations
 from rag.rag_engine import validate_with_rag
 
@@ -53,7 +54,7 @@ def extract_entities(state: IAMState) -> IAMState:
         "application_name": state.get("application_name"),
         "role_name": state.get("role_name")
     }
-    state = extract_request_parallel_sync(state)
+    state = asyncio.run(extract_request_unified(state))
     
     # Trace this node
     tracer = get_tracer()

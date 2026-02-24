@@ -1,3 +1,4 @@
+import time
 from langchain_core.tools import tool
 from toolbox_langchain import ToolboxClient
 
@@ -22,6 +23,8 @@ def validate_entity_tool(
     SELECT <id_column> FROM <table> WHERE <name_column> = ? LIMIT 1
     
     Returns: JSON list of matching records or error message
+    
+    Includes retry logic to handle transient connection issues with the toolbox.
     """
     
     # Handle None/empty values
@@ -49,13 +52,45 @@ def validate_entity_tool(
     )
 
     cfg = load_config()
-    with ToolboxClient(cfg["toolbox"]["url"]) as client:
-        sql_tool = client.load_toolset("iam")[0]
-        result = sql_tool.invoke({"sql": sql})
     
-    # Trace tool invocation
-    tracer = get_tracer()
-    if tracer.is_enabled():
-        tracer.trace_tool("validate_entity_tool", input_params, result)
+    # Retry logic for transient connection errors
+    max_retries = 3
+    retry_delay = 0.5  # seconds
+    last_error = None
     
-    return result
+    for attempt in range(max_retries):
+        try:
+            with ToolboxClient(cfg["toolbox"]["url"]) as client:
+                sql_tool = client.load_toolset("iam")[0]
+                result = sql_tool.invoke({"sql": sql})
+            
+            # Trace tool invocation
+            tracer = get_tracer()
+            if tracer.is_enabled():
+                tracer.trace_tool("validate_entity_tool", input_params, result)
+            
+            return result
+            
+        except (ConnectionError, ConnectionResetError, OSError, TimeoutError, BrokenPipeError) as e:
+            # Handle connection errors with retry
+            last_error = e
+            error_msg = str(e)
+            
+            # Check for specific connection reset errors
+            if "Connection reset" in error_msg or "104" in error_msg or "connection refused" in error_msg.lower():
+                if attempt < max_retries - 1:
+                    # Wait before retrying with exponential backoff
+                    time.sleep(retry_delay * (2 ** attempt))
+                    continue
+            
+            # If it's the last attempt or not a retryable error, return the error
+            return f"Error: {error_msg}"
+        
+        except Exception as e:
+            # For non-connection errors, return immediately
+            last_error = e
+            return f"Error: {str(e)}"
+    
+    # If all retries exhausted
+    if last_error:
+        return f"Error: {str(last_error)} (after {max_retries} retries)"

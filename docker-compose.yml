@@ -12,6 +12,10 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./database/iam_sample_data.sql:/docker-entrypoint-initdb.d/01-init.sql
+    command:
+      - "postgres"
+      - "-c"
+      - "ssl=off"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 10s
