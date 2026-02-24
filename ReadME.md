@@ -64,7 +64,7 @@ AskIAM-Assistant/
 ├── docker-compose.yml          # Docker services
 ├── requirements.txt            # Dependencies
 ├── tools.yaml                  # MCP config
-└── ReadME.md                   # This file
+└── ReadME.md
 ```
 
 ---
