@@ -18,7 +18,7 @@ The AskIAM Assistant provides an intelligent chatbot interface for validating IA
 ## Architecture Overview
 
 <p align="center">
-  <img src="ARCHITECTURE_DIAGRAM.md" alt="IAM Access Validation Architecture" width="800"/>
+  <img src="Architecture Diagram.png" alt="IAM Access Validation Architecture" width="800"/>
 </p>
 
 The system captures comprehensive traces across:
